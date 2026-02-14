@@ -4,3 +4,4 @@ numpy
 numba
 tabulate
 tqdm
+ccxt
