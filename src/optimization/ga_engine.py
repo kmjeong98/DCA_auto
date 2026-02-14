@@ -1365,7 +1365,10 @@ class GAEngine:
                 np.float32(cfg.max_sl_price_cap)
             )
             
-            fitness_scores = results[:curr_pop_size, 0]
+            # 현재 세대의 평가 크기 저장 (진화 연산에 사용)
+            eval_pop_size = curr_pop_size
+            
+            fitness_scores = results[:eval_pop_size, 0]
             sorted_indices = np.argsort(fitness_scores)[::-1].astype(np.int32)
             
             best_idx = sorted_indices[0]
@@ -1383,15 +1386,9 @@ class GAEngine:
                 if curr_pop_size > ga.min_pop_size:
                     pop_curr[0] = pop_curr[best_idx]
                     curr_pop_size = ga.min_pop_size
+                    eval_pop_size = curr_pop_size
             else:
                 patience += 1
-            
-            if curr_pop_size < ga.max_pop_size and patience > 0 and patience % ga.growth_interval == 0:
-                new_size = min(int(curr_pop_size * ga.growth_multiplier), ga.max_pop_size)
-                if new_size > curr_pop_size:
-                    # 새로운 개체 추가
-                    init_population(pop_curr[curr_pop_size:new_size], bounds)
-                    curr_pop_size = new_size
             
             # 체크포인트
             if patience == ga.max_patience_limit // 2:
@@ -1407,25 +1404,31 @@ class GAEngine:
             progress = patience / ga.max_patience_limit
             mut_rate = (1.0 / GENOME_SIZE) + (0.8 * (progress ** 4))
             
-            elite_count = int(curr_pop_size * ga.elite_ratio)
+            elite_count = int(eval_pop_size * ga.elite_ratio)
             if elite_count < 1:
                 elite_count = 1
             
             # 진화 (병렬)
-            # sorted_indices를 max_pop_size 크기로 확장
             full_sorted_indices = np.zeros(ga.max_pop_size, dtype=np.int32)
-            full_sorted_indices[:curr_pop_size] = sorted_indices
+            full_sorted_indices[:eval_pop_size] = sorted_indices
             
             evolve_population(
-                pop_curr[:curr_pop_size],
-                pop_next[:curr_pop_size],
-                results[:curr_pop_size],
+                pop_curr[:eval_pop_size],
+                pop_next[:eval_pop_size],
+                results[:eval_pop_size],
                 bounds,
                 np.float32(mut_rate),
                 full_sorted_indices,
                 np.int32(elite_count),
-                np.int32(curr_pop_size)
+                np.int32(eval_pop_size)
             )
+            
+            # Population 성장 (다음 세대용)
+            if curr_pop_size < ga.max_pop_size and patience > 0 and patience % ga.growth_interval == 0:
+                new_size = min(int(curr_pop_size * ga.growth_multiplier), ga.max_pop_size)
+                if new_size > curr_pop_size:
+                    init_population(pop_next[curr_pop_size:new_size], bounds)
+                    curr_pop_size = new_size
             
             pop_curr, pop_next = pop_next, pop_curr
             
@@ -1450,10 +1453,10 @@ class GAEngine:
         
         return result
     
-    def run(self, tickers: List[str]) -> Dict[str, OptimizationResult]:
+    def run(self, tickers: Optional[List[str]] = None) -> Dict[str, OptimizationResult]:
         """모든 티커에 대해 최적화 실행 및 결과 저장."""
         if not tickers:
-            raise ValueError("tickers 리스트가 비어있습니다.")
+            raise ValueError("tickers 파라미터는 필수입니다. run(tickers=['BTC/USDT', ...])")
         
         cfg = self.sim_config
         tpm = trades_per_month(cfg.timeframe)
@@ -1475,3 +1478,29 @@ class GAEngine:
                 print(f"✅ {ticker} 파라미터 저장완료: {filepath}")
         
         return results
+
+
+# ==========================================
+# 9. Entry Point
+# ==========================================
+
+def main():
+    """메인 실행 함수."""
+    # 기본 설정으로 엔진 생성
+    sim_config = SimulationConfig(
+        timeframe="1m",
+        data_years=5,
+    )
+    
+    ga_config = GAConfig()
+    
+    tickers = ("DOGE/USDT", "ZEC/USDT", "SUI/USDT", "ETH/USDT", "BTC/USDT", "SOL/USDT")
+    
+    engine = GAEngine(sim_config=sim_config, ga_config=ga_config)
+    results = engine.run(tickers=tickers)
+    
+    print(f"\n🎉 최적화 완료! 총 {len(results)}개 티커 처리됨.")
+
+
+if __name__ == "__main__":
+    main()
