@@ -1,4 +1,4 @@
-"""유전 알고리즘 핵심 엔진 (GPU 기반 DCA 전략 최적화)."""
+"""유전 알고리즘 핵심 엔진 (CPU 병렬화 기반 DCA 전략 최적화 - Apple Silicon 호환)."""
 
 from __future__ import annotations
 
@@ -14,9 +14,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from numba import cuda, float32, int32
+from numba import njit, prange, float32, int32
 from numba.core.errors import NumbaPerformanceWarning
-from numba.cuda.random import create_xoroshiro128p_states, xoroshiro128p_uniform_float32
 from tabulate import tabulate
 from tqdm.auto import tqdm
 
@@ -133,37 +132,21 @@ PARAM_BOUNDS_HOST = np.array([
 
 ABSOLUTE_MIN_TRADES = 10.0
 
-
-# ==========================================
-# 3. GPU Constants (Module-level for Numba)
-# ==========================================
-
-# These will be set before kernel execution
-CONST_INITIAL_CAPITAL = 1000.0
-CONST_FEE_RATE = 0.0005
-CONST_SLIP_RATE = 0.0003
-CONST_FIXED_BASE_MARGIN = 5.0
-CONST_FIXED_DCA_MARGIN = 5.0
-CONST_FIXED_ALLOC_LONG = 0.6
-CONST_FIXED_LEV_LONG = 25
-CONST_FIXED_LEV_SHORT = 20
-CONST_ABS_CAP_DCA = 15
-CONST_DCA_SL_GAP = 0.005
-CONST_LIQ_BUFFER = 0.98
-CONST_MAX_SL_PRICE_CAP = 0.95
-CONST_MIN_SL_PRICE = 0.005
+# 상수 캡
+ABS_CAP_DCA_CONST = 15
 
 
 # ==========================================
-# 4. Simulation Logic (Device Functions)
+# 3. Simulation Logic (JIT Functions)
 # ==========================================
 
-@cuda.jit(device=True, inline=True)
+@njit(cache=True, fastmath=True)
 def _update_mdd_mark_to_market(
     mark_p,
     l_balance, l_amt, l_cost, l_lev,
     s_balance, s_amt, s_cost, s_lev,
-    peak_equity, max_dd
+    peak_equity, max_dd,
+    initial_capital
 ):
     l_eq = l_balance
     if l_amt > 0.0:
@@ -180,20 +163,24 @@ def _update_mdd_mark_to_market(
     if combined > peak_equity:
         peak_equity = combined
 
-    dd = (peak_equity - combined) / CONST_INITIAL_CAPITAL
+    dd = (peak_equity - combined) / initial_capital
     if dd > max_dd:
         max_dd = dd
 
     return peak_equity, max_dd
 
 
-@cuda.jit(device=True, inline=True)
-def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval, cooldown_bars):
-    long_ratio = CONST_FIXED_ALLOC_LONG
+@njit(cache=True, fastmath=True)
+def run_dual_simulation(
+    opens, closes, x1s, x2s, params, n_bars, sharpe_interval, cooldown_bars,
+    initial_capital, fee_rate, slip_rate, fixed_base_margin, fixed_dca_margin,
+    fixed_alloc_long, fixed_lev_long, fixed_lev_short
+):
+    long_ratio = fixed_alloc_long
     short_ratio = 1.0 - long_ratio
 
-    l_lev = CONST_FIXED_LEV_LONG
-    s_lev = CONST_FIXED_LEV_SHORT
+    l_lev = fixed_lev_long
+    s_lev = fixed_lev_short
 
     # 파라미터 로딩
     l_dev = params[P_L_PRICE_DEVIATION]
@@ -201,48 +188,48 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
     l_max_dca = int(params[P_L_MAX_DCA] + 0.5)
     l_dev_mult = params[P_L_DEV_MULT]
     l_vol_mult = params[P_L_VOL_MULT]
-    l_base_m = CONST_FIXED_BASE_MARGIN
-    l_dca_m = CONST_FIXED_DCA_MARGIN
+    l_base_m = fixed_base_margin
+    l_dca_m = fixed_dca_margin
 
     s_dev = params[P_S_PRICE_DEVIATION]
     s_tp = params[P_S_TAKE_PROFIT]
     s_max_dca = int(params[P_S_MAX_DCA])
     s_dev_mult = params[P_S_DEV_MULT]
     s_vol_mult = params[P_S_VOL_MULT]
-    s_base_m = CONST_FIXED_BASE_MARGIN
-    s_dca_m = CONST_FIXED_DCA_MARGIN
+    s_base_m = fixed_base_margin
+    s_dca_m = fixed_dca_margin
 
     l_sl_target = params[P_L_SL_RATIO]
     s_sl_target = params[P_S_SL_RATIO]
 
-    l_balance = CONST_INITIAL_CAPITAL * long_ratio
-    s_balance = CONST_INITIAL_CAPITAL * short_ratio
+    l_balance = initial_capital * long_ratio
+    s_balance = initial_capital * short_ratio
 
     # 초기 진입 자금 확인
     l_active = True
-    l_start_fee = (l_base_m * l_lev) * CONST_FEE_RATE
+    l_start_fee = (l_base_m * l_lev) * fee_rate
     if (l_base_m + l_start_fee) > l_balance:
         l_active = False
         l_max_dca = 0
 
     s_active = True
-    s_start_fee = (s_base_m * s_lev) * CONST_FEE_RATE
+    s_start_fee = (s_base_m * s_lev) * fee_rate
     if (s_base_m + s_start_fee) > s_balance:
         s_active = False
         s_max_dca = 0
 
     # DCA Trigger Calculation
-    l_dca_ratios = cuda.local.array(CONST_ABS_CAP_DCA, dtype=float32)
-    l_dca_vols = cuda.local.array(CONST_ABS_CAP_DCA, dtype=float32)
-    s_dca_ratios = cuda.local.array(CONST_ABS_CAP_DCA, dtype=float32)
-    s_dca_vols = cuda.local.array(CONST_ABS_CAP_DCA, dtype=float32)
+    l_dca_ratios = np.zeros(ABS_CAP_DCA_CONST, dtype=np.float32)
+    l_dca_vols = np.zeros(ABS_CAP_DCA_CONST, dtype=np.float32)
+    s_dca_ratios = np.zeros(ABS_CAP_DCA_CONST, dtype=np.float32)
+    s_dca_vols = np.zeros(ABS_CAP_DCA_CONST, dtype=np.float32)
 
     # Long Pre-calculation
     curr_ratio = 1.0
     curr_step_dev = l_dev
     curr_vol = 1.0
 
-    for k in range(CONST_ABS_CAP_DCA):
+    for k in range(ABS_CAP_DCA_CONST):
         if k < l_max_dca:
             curr_ratio = curr_ratio * (1.0 - curr_step_dev)
             l_dca_ratios[k] = curr_ratio
@@ -255,7 +242,7 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
     curr_step_dev = s_dev
     curr_vol = 1.0
 
-    for k in range(CONST_ABS_CAP_DCA):
+    for k in range(ABS_CAP_DCA_CONST):
         if k < s_max_dca:
             curr_ratio = curr_ratio * (1.0 + curr_step_dev)
             s_dca_ratios[k] = curr_ratio
@@ -273,12 +260,12 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
     s_amt, s_cost, s_avg, s_dca_cnt = 0.0, 0.0, 0.0, 0
     s_base_price = 0.0
 
-    peak_combined_equity = CONST_INITIAL_CAPITAL
+    peak_combined_equity = initial_capital
     max_dd = 0.0
 
     total_trades = 0.0
 
-    sharpe_last_equity = CONST_INITIAL_CAPITAL
+    sharpe_last_equity = initial_capital
     sharpe_sum_r = 0.0
     sharpe_sum_sq = 0.0
     sharpe_cnt = 0
@@ -291,10 +278,10 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
     # 첫 진입 (Base)
     if l_active:
         trigger_p = start_open
-        fill_p = trigger_p * (1.0 + CONST_SLIP_RATE)
+        fill_p = trigger_p * (1.0 + slip_rate)
 
         notional = l_base_m * l_lev
-        fee = notional * CONST_FEE_RATE
+        fee = notional * fee_rate
 
         l_balance -= (l_base_m + fee)
         l_amt = notional / fill_p
@@ -304,10 +291,10 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
 
     if s_active:
         trigger_p = start_open
-        fill_p = trigger_p * (1.0 - CONST_SLIP_RATE)
+        fill_p = trigger_p * (1.0 - slip_rate)
 
         notional = s_base_m * s_lev
-        fee = notional * CONST_FEE_RATE
+        fee = notional * fee_rate
 
         s_balance -= (s_base_m + fee)
         s_amt = notional / fill_p
@@ -319,11 +306,12 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
         start_open,
         l_balance, l_amt, l_cost, l_lev,
         s_balance, s_amt, s_cost, s_lev,
-        peak_combined_equity, max_dd
+        peak_combined_equity, max_dd,
+        initial_capital
     )
 
     prev_close = start_open
-    path_points = cuda.local.array(5, dtype=float32)
+    path_points = np.zeros(5, dtype=np.float32)
 
     # 메인 루프
     for i in range(n_bars):
@@ -332,10 +320,10 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
         # Long 신규 진입
         if l_active and l_amt == 0 and i >= l_wait_until:
             trigger_p = curr_open
-            fill_p = trigger_p * (1.0 + CONST_SLIP_RATE)
+            fill_p = trigger_p * (1.0 + slip_rate)
             margin = l_base_m
             notional = margin * l_lev
-            fee = notional * CONST_FEE_RATE
+            fee = notional * fee_rate
             req_cash = margin + fee
 
             if l_balance >= req_cash:
@@ -351,10 +339,10 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
         # Short 신규 진입
         if s_active and s_amt == 0 and i >= s_wait_until:
             trigger_p = curr_open
-            fill_p = trigger_p * (1.0 - CONST_SLIP_RATE)
+            fill_p = trigger_p * (1.0 - slip_rate)
             margin = s_base_m
             notional = margin * s_lev
-            fee = notional * CONST_FEE_RATE
+            fee = notional * fee_rate
             req_cash = margin + fee
 
             if s_balance >= req_cash:
@@ -371,7 +359,8 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
             curr_open,
             l_balance, l_amt, l_cost, l_lev,
             s_balance, s_amt, s_cost, s_lev,
-            peak_combined_equity, max_dd
+            peak_combined_equity, max_dd,
+            initial_capital
         )
 
         # High/Low Path Logic
@@ -394,7 +383,8 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
                 start_p,
                 l_balance, l_amt, l_cost, l_lev,
                 s_balance, s_amt, s_cost, s_lev,
-                peak_combined_equity, max_dd
+                peak_combined_equity, max_dd,
+                initial_capital
             )
 
             # Long Logic
@@ -442,12 +432,12 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
                     if action == 1:  # DCA
                         margin = l_dca_vols[l_dca_cnt]
                         notional = margin * l_lev
-                        fee = notional * CONST_FEE_RATE
+                        fee = notional * fee_rate
                         req_cash = margin + fee
 
                         if l_balance >= req_cash:
                             l_balance -= req_cash
-                            eff_p = best_p * (1.0 + CONST_SLIP_RATE)
+                            eff_p = best_p * (1.0 + slip_rate)
                             l_amt += notional / eff_p
                             l_cost += margin
                             l_dca_cnt += 1
@@ -463,7 +453,8 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
                                 start_p,
                                 l_balance, l_amt, l_cost, l_lev,
                                 s_balance, s_amt, s_cost, s_lev,
-                                peak_combined_equity, max_dd
+                                peak_combined_equity, max_dd,
+                                initial_capital
                             )
                         else:
                             start_p = best_p - 0.000001
@@ -476,14 +467,15 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
                                 best_p,
                                 l_balance, l_amt, l_cost, l_lev,
                                 s_balance, s_amt, s_cost, s_lev,
-                                peak_combined_equity, max_dd
+                                peak_combined_equity, max_dd,
+                                initial_capital
                             )
 
                     else:  # SL or TP
-                        exit_fill = best_p * (1.0 - CONST_SLIP_RATE)
+                        exit_fill = best_p * (1.0 - slip_rate)
                         val = l_amt * exit_fill
                         pnl = val - (l_cost * l_lev)
-                        fee = val * CONST_FEE_RATE
+                        fee = val * fee_rate
 
                         ret = l_cost + pnl - fee
                         if ret < 0:
@@ -501,7 +493,8 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
                             best_p,
                             l_balance, l_amt, l_cost, l_lev,
                             s_balance, s_amt, s_cost, s_lev,
-                            peak_combined_equity, max_dd
+                            peak_combined_equity, max_dd,
+                            initial_capital
                         )
 
                         if action == 2:  # Stop Loss
@@ -511,12 +504,12 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
                         elif action == 4:  # Take Profit
                             margin = l_base_m
                             notional = margin * l_lev
-                            fee = notional * CONST_FEE_RATE
+                            fee = notional * fee_rate
                             req_cash = margin + fee
 
                             if l_balance >= req_cash:
                                 l_balance -= req_cash
-                                eff_p = best_p * (1.0 + CONST_SLIP_RATE)
+                                eff_p = best_p * (1.0 + slip_rate)
 
                                 l_amt = notional / eff_p
                                 l_cost = margin
@@ -534,7 +527,8 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
                                     best_p,
                                     l_balance, l_amt, l_cost, l_lev,
                                     s_balance, s_amt, s_cost, s_lev,
-                                    peak_combined_equity, max_dd
+                                    peak_combined_equity, max_dd,
+                                    initial_capital
                                 )
                             else:
                                 l_active = False
@@ -585,12 +579,12 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
                     if action == 1:  # DCA
                         margin = s_dca_vols[s_dca_cnt]
                         notional = margin * s_lev
-                        fee = notional * CONST_FEE_RATE
+                        fee = notional * fee_rate
                         req_cash = margin + fee
 
                         if s_balance >= req_cash:
                             s_balance -= req_cash
-                            eff_p = best_p * (1.0 - CONST_SLIP_RATE)
+                            eff_p = best_p * (1.0 - slip_rate)
                             s_amt += notional / eff_p
                             s_cost += margin
                             s_dca_cnt += 1
@@ -606,7 +600,8 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
                                 start_p,
                                 l_balance, l_amt, l_cost, l_lev,
                                 s_balance, s_amt, s_cost, s_lev,
-                                peak_combined_equity, max_dd
+                                peak_combined_equity, max_dd,
+                                initial_capital
                             )
                         else:
                             start_p = best_p + 0.000001
@@ -619,15 +614,16 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
                                 best_p,
                                 l_balance, l_amt, l_cost, l_lev,
                                 s_balance, s_amt, s_cost, s_lev,
-                                peak_combined_equity, max_dd
+                                peak_combined_equity, max_dd,
+                                initial_capital
                             )
 
                     else:  # SL or TP
-                        exit_fill = best_p * (1.0 + CONST_SLIP_RATE)
+                        exit_fill = best_p * (1.0 + slip_rate)
                         val = s_amt * exit_fill
                         pnl = (s_cost * s_lev) - val
 
-                        fee = val * CONST_FEE_RATE
+                        fee = val * fee_rate
                         ret = s_cost + pnl - fee
                         if ret < 0:
                             ret = 0
@@ -644,7 +640,8 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
                             best_p,
                             l_balance, l_amt, l_cost, l_lev,
                             s_balance, s_amt, s_cost, s_lev,
-                            peak_combined_equity, max_dd
+                            peak_combined_equity, max_dd,
+                            initial_capital
                         )
 
                         if action == 2:  # Stop Loss
@@ -654,12 +651,12 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
                         elif action == 4:  # Take Profit
                             margin = s_base_m
                             notional = margin * s_lev
-                            fee = notional * CONST_FEE_RATE
+                            fee = notional * fee_rate
                             req_cash = margin + fee
 
                             if s_balance >= req_cash:
                                 s_balance -= req_cash
-                                eff_p = best_p * (1.0 - CONST_SLIP_RATE)
+                                eff_p = best_p * (1.0 - slip_rate)
 
                                 s_amt = notional / eff_p
                                 s_cost = margin
@@ -677,7 +674,8 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
                                     best_p,
                                     l_balance, l_amt, l_cost, l_lev,
                                     s_balance, s_amt, s_cost, s_lev,
-                                    peak_combined_equity, max_dd
+                                    peak_combined_equity, max_dd,
+                                    initial_capital
                                 )
                             else:
                                 s_active = False
@@ -687,7 +685,8 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
                 end_p,
                 l_balance, l_amt, l_cost, l_lev,
                 s_balance, s_amt, s_cost, s_lev,
-                peak_combined_equity, max_dd
+                peak_combined_equity, max_dd,
+                initial_capital
             )
 
         # Equity Update
@@ -707,7 +706,7 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
         if sharpe_interval > 0 and ((i + 1) % sharpe_interval == 0):
             if sharpe_last_equity > 0:
                 profit_delta = combined - sharpe_last_equity
-                step_ret = profit_delta / CONST_INITIAL_CAPITAL
+                step_ret = profit_delta / initial_capital
                 sharpe_sum_r += step_ret
                 sharpe_sum_sq += (step_ret * step_ret)
                 sharpe_cnt += 1
@@ -719,8 +718,8 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
     if s_amt > 0:
         final_equity += s_cost + ((s_cost * s_lev) - s_amt * closes[n_bars - 1])
 
-    net_profit = final_equity - CONST_INITIAL_CAPITAL
-    roi = (net_profit / CONST_INITIAL_CAPITAL) * 100.0
+    net_profit = final_equity - initial_capital
+    roi = (net_profit / initial_capital) * 100.0
     mdd = max_dd * 100.0
 
     sharpe = 0.0
@@ -735,10 +734,10 @@ def run_dual_simulation(opens, closes, x1s, x2s, params, n_bars, sharpe_interval
 
 
 # ==========================================
-# 5. Parameter Legalization
+# 4. Parameter Legalization
 # ==========================================
 
-@cuda.jit(device=True, inline=True)
+@njit(cache=True, fastmath=True)
 def validate_and_fix_side(
     balance_limit,
     lev,
@@ -749,16 +748,17 @@ def validate_and_fix_side(
     dev_mult,
     target_dca,
     sl_pct_gene,
-    is_long
+    is_long,
+    fee_rate, min_sl_price, dca_sl_gap, liq_buffer, max_sl_price_cap
 ):
     valid_dca_count = 0
     valid_deepest_dev_ratio = 0.0
 
     curr_margin = base_m
 
-    current_balance = balance_limit - (base_m * (1.0 + CONST_FEE_RATE * lev))
+    current_balance = balance_limit - (base_m * (1.0 + fee_rate * lev))
     if current_balance < 0:
-        return 0.0, float(CONST_MIN_SL_PRICE)
+        return 0.0, float(min_sl_price)
 
     next_dca_margin = dca_m
     curr_price_ratio = 1.0
@@ -769,7 +769,7 @@ def validate_and_fix_side(
     curr_avg_ratio = 1.0
 
     for i in range(1, int(target_dca) + 1):
-        if i > CONST_ABS_CAP_DCA:
+        if i > ABS_CAP_DCA_CONST:
             break
 
         if is_long:
@@ -778,7 +778,7 @@ def validate_and_fix_side(
             curr_price_ratio = curr_price_ratio * (1.0 + curr_step_dev)
 
         req_notional = next_dca_margin * lev
-        req_fee = req_notional * CONST_FEE_RATE
+        req_fee = req_notional * fee_rate
         cost_req = next_dca_margin + req_fee
 
         if current_balance < cost_req:
@@ -812,17 +812,17 @@ def validate_and_fix_side(
         liq_ratio = curr_avg_ratio + wallet_per_amt
         max_move = liq_ratio - 1.0
 
-    abs_max_sl = max_move * CONST_LIQ_BUFFER
-    if abs_max_sl > CONST_MAX_SL_PRICE_CAP:
-        abs_max_sl = CONST_MAX_SL_PRICE_CAP
-    if abs_max_sl < CONST_MIN_SL_PRICE:
-        abs_max_sl = CONST_MIN_SL_PRICE
+    abs_max_sl = max_move * liq_buffer
+    if abs_max_sl > max_sl_price_cap:
+        abs_max_sl = max_sl_price_cap
+    if abs_max_sl < min_sl_price:
+        abs_max_sl = min_sl_price
 
-    min_sl = float(CONST_MIN_SL_PRICE)
+    min_sl = float(min_sl_price)
     if valid_dca_count > 0:
-        min_sl = valid_deepest_dev_ratio + CONST_DCA_SL_GAP
-        if min_sl < CONST_MIN_SL_PRICE:
-            min_sl = CONST_MIN_SL_PRICE
+        min_sl = valid_deepest_dev_ratio + dca_sl_gap
+        if min_sl < min_sl_price:
+            min_sl = min_sl_price
 
     if min_sl >= abs_max_sl:
         final_sl = abs_max_sl
@@ -834,67 +834,89 @@ def validate_and_fix_side(
             sl = abs_max_sl
         final_sl = sl
 
-    if final_sl < CONST_MIN_SL_PRICE:
-        final_sl = CONST_MIN_SL_PRICE
-    if final_sl > CONST_MAX_SL_PRICE_CAP:
-        final_sl = CONST_MAX_SL_PRICE_CAP
+    if final_sl < min_sl_price:
+        final_sl = min_sl_price
+    if final_sl > max_sl_price_cap:
+        final_sl = max_sl_price_cap
 
     return float(valid_dca_count), float(final_sl)
 
 
-@cuda.jit(device=True, inline=True)
-def legalize_genome(genome):
+@njit(cache=True, fastmath=True)
+def legalize_genome(
+    genome,
+    initial_capital, fixed_alloc_long, fixed_lev_long, fixed_lev_short,
+    fixed_base_margin, fixed_dca_margin,
+    fee_rate, min_sl_price, dca_sl_gap, liq_buffer, max_sl_price_cap
+):
     # Long
-    l_alloc = CONST_FIXED_ALLOC_LONG * CONST_INITIAL_CAPITAL
+    l_alloc = fixed_alloc_long * initial_capital
     l_res_dca, l_res_sl = validate_and_fix_side(
         l_alloc,
-        CONST_FIXED_LEV_LONG,
-        CONST_FIXED_BASE_MARGIN,
-        CONST_FIXED_DCA_MARGIN,
+        fixed_lev_long,
+        fixed_base_margin,
+        fixed_dca_margin,
         genome[P_L_VOL_MULT],
         genome[P_L_PRICE_DEVIATION],
         genome[P_L_DEV_MULT],
         genome[P_L_MAX_DCA],
         genome[P_L_SL_RATIO],
-        1
+        1,
+        fee_rate, min_sl_price, dca_sl_gap, liq_buffer, max_sl_price_cap
     )
-    genome[P_L_MAX_DCA] = float32(l_res_dca)
-    genome[P_L_SL_RATIO] = float32(l_res_sl)
+    genome[P_L_MAX_DCA] = np.float32(l_res_dca)
+    genome[P_L_SL_RATIO] = np.float32(l_res_sl)
 
     # Short
-    s_alloc = (1.0 - CONST_FIXED_ALLOC_LONG) * CONST_INITIAL_CAPITAL
+    s_alloc = (1.0 - fixed_alloc_long) * initial_capital
     s_res_dca, s_res_sl = validate_and_fix_side(
         s_alloc,
-        CONST_FIXED_LEV_SHORT,
-        CONST_FIXED_BASE_MARGIN,
-        CONST_FIXED_DCA_MARGIN,
+        fixed_lev_short,
+        fixed_base_margin,
+        fixed_dca_margin,
         genome[P_S_VOL_MULT],
         genome[P_S_PRICE_DEVIATION],
         genome[P_S_DEV_MULT],
         genome[P_S_MAX_DCA],
         genome[P_S_SL_RATIO],
-        0
+        0,
+        fee_rate, min_sl_price, dca_sl_gap, liq_buffer, max_sl_price_cap
     )
-    genome[P_S_MAX_DCA] = float32(s_res_dca)
-    genome[P_S_SL_RATIO] = float32(s_res_sl)
+    genome[P_S_MAX_DCA] = np.float32(s_res_dca)
+    genome[P_S_SL_RATIO] = np.float32(s_res_sl)
 
 
 # ==========================================
-# 6. GPU Kernels
+# 5. Parallel Evaluation & Evolution Functions
 # ==========================================
 
-@cuda.jit(fastmath=True)
-def evaluate_kernel(population, results, o, c, x1s, x2s, days, trades_per_month_value, sharpe_interval, cooldown_bars):
-    idx = cuda.grid(1)
-    if idx < population.shape[0]:
-        genome = cuda.local.array(GENOME_SIZE, dtype=float32)
-        for i in range(GENOME_SIZE):
-            genome[i] = population[idx, i]
-
-        legalize_genome(genome)
+@njit(parallel=True, cache=True, fastmath=True)
+def evaluate_population(
+    population, results, opens, closes, x1s, x2s,
+    days, trades_per_month_value, sharpe_interval, cooldown_bars,
+    initial_capital, fee_rate, slip_rate, fixed_base_margin, fixed_dca_margin,
+    fixed_alloc_long, fixed_lev_long, fixed_lev_short,
+    min_sl_price, dca_sl_gap, liq_buffer, max_sl_price_cap
+):
+    """병렬로 전체 population 평가."""
+    pop_size = population.shape[0]
+    n_bars = opens.shape[0]
+    
+    for idx in prange(pop_size):
+        genome = population[idx].copy()
+        
+        # Legalize genome
+        legalize_genome(
+            genome,
+            initial_capital, fixed_alloc_long, fixed_lev_long, fixed_lev_short,
+            fixed_base_margin, fixed_dca_margin,
+            fee_rate, min_sl_price, dca_sl_gap, liq_buffer, max_sl_price_cap
+        )
 
         r, mdd, _, num, _, _, sharpe = run_dual_simulation(
-            o, c, x1s, x2s, genome, o.shape[0], sharpe_interval, cooldown_bars
+            opens, closes, x1s, x2s, genome, n_bars, sharpe_interval, cooldown_bars,
+            initial_capital, fee_rate, slip_rate, fixed_base_margin, fixed_dca_margin,
+            fixed_alloc_long, fixed_lev_long, fixed_lev_short
         )
 
         months = days / 30.0
@@ -913,7 +935,7 @@ def evaluate_kernel(population, results, o, c, x1s, x2s, days, trades_per_month_
         if num < req:
             pen *= (num / req)
 
-        risk_factor = 1.0 + math.pow(mdd / 50.0, 2)
+        risk_factor = 1.0 + (mdd / 50.0) ** 2
 
         sharpe_mult = 1.0
         if sharpe > 0:
@@ -932,13 +954,8 @@ def evaluate_kernel(population, results, o, c, x1s, x2s, days, trades_per_month_
         results[idx, 4] = sharpe
 
 
-@cuda.jit(device=True)
-def get_rand(rng_states, tid):
-    return xoroshiro128p_uniform_float32(rng_states, tid)
-
-
-@cuda.jit(device=True)
-def apply_bounds_gpu(val, idx, bounds):
+@njit(cache=True, fastmath=True)
+def apply_bounds(val, idx, bounds):
     min_v = bounds[idx, 0]
     max_v = bounds[idx, 1]
     if val < min_v:
@@ -948,89 +965,85 @@ def apply_bounds_gpu(val, idx, bounds):
     return val
 
 
-@cuda.jit(device=True)
-def mutate_gene_gpu(val, idx, bounds, rng_states, tid):
-    r = get_rand(rng_states, tid)
+@njit(cache=True, fastmath=True)
+def mutate_gene(val, idx, bounds, rng):
+    r = rng
     if r < 0.5:
-        factor = 0.85 + get_rand(rng_states, tid) * 0.3
+        factor = 0.85 + np.random.random() * 0.3
         val *= factor
     else:
-        shift = get_rand(rng_states, tid) * 0.02 - 0.01
+        shift = np.random.random() * 0.02 - 0.01
         val += shift
 
-    return apply_bounds_gpu(val, idx, bounds)
+    return apply_bounds(val, idx, bounds)
 
 
-@cuda.jit(fastmath=True)
-def evolve_kernel(rng_states, old_pop, new_pop, fitness, bounds, mut_rate, sorted_indices, elite_count, pop_size):
-    tid = cuda.grid(1)
-    if tid >= pop_size:
-        return
+@njit(parallel=True, cache=True, fastmath=True)
+def evolve_population(old_pop, new_pop, fitness, bounds, mut_rate, sorted_indices, elite_count, pop_size):
+    """병렬로 진화 연산 수행."""
+    
+    for tid in prange(pop_size):
+        # Elitism
+        if tid < elite_count:
+            parent_idx = sorted_indices[tid]
+            for i in range(GENOME_SIZE):
+                new_pop[tid, i] = old_pop[parent_idx, i]
+            continue
 
-    # Elitism
-    if tid < elite_count:
-        parent_idx = sorted_indices[tid]
+        # Tournament selection
+        best_p1 = -1
+        best_fit1 = -1e20
+
+        for _ in range(3):
+            rand_idx = int(np.random.random() * pop_size)
+            if rand_idx >= pop_size:
+                rand_idx = pop_size - 1
+            score = fitness[rand_idx, 0]
+            if score > best_fit1:
+                best_fit1 = score
+                best_p1 = rand_idx
+
+        best_p2 = -1
+        best_fit2 = -1e20
+        for _ in range(3):
+            rand_idx = int(np.random.random() * pop_size)
+            if rand_idx >= pop_size:
+                rand_idx = pop_size - 1
+            score = fitness[rand_idx, 0]
+            if score > best_fit2:
+                best_fit2 = score
+                best_p2 = rand_idx
+
+        split_point = 1 + int(np.random.random() * (GENOME_SIZE - 2))
+
         for i in range(GENOME_SIZE):
-            new_pop[tid, i] = old_pop[parent_idx, i]
-        return
+            val = 0.0
+            if i < split_point:
+                val = old_pop[best_p1, i]
+            else:
+                val = old_pop[best_p2, i]
 
-    # Tournament selection
-    best_p1 = -1
-    best_fit1 = -1e20
+            if np.random.random() < mut_rate:
+                val = mutate_gene(val, i, bounds, np.random.random())
 
-    for _ in range(3):
-        rand_idx = int(get_rand(rng_states, tid) * pop_size)
-        if rand_idx >= pop_size:
-            rand_idx = pop_size - 1
-        score = fitness[rand_idx, 0]
-        if score > best_fit1:
-            best_fit1 = score
-            best_p1 = rand_idx
-
-    best_p2 = -1
-    best_fit2 = -1e20
-    for _ in range(3):
-        rand_idx = int(get_rand(rng_states, tid) * pop_size)
-        if rand_idx >= pop_size:
-            rand_idx = pop_size - 1
-        score = fitness[rand_idx, 0]
-        if score > best_fit2:
-            best_fit2 = score
-            best_p2 = rand_idx
-
-    split_point = 1 + int(get_rand(rng_states, tid) * (GENOME_SIZE - 2))
-
-    for i in range(GENOME_SIZE):
-        val = 0.0
-        if i < split_point:
-            val = old_pop[best_p1, i]
-        else:
-            val = old_pop[best_p2, i]
-
-        if get_rand(rng_states, tid) < mut_rate:
-            val = mutate_gene_gpu(val, i, bounds, rng_states, tid)
-
-        new_pop[tid, i] = val
+            new_pop[tid, i] = val
 
 
-@cuda.jit(fastmath=True)
-def init_population_kernel(pop, bounds, rng_states):
-    idx = cuda.grid(1)
-    if idx < pop.shape[0]:
+@njit(parallel=True, cache=True)
+def init_population(pop, bounds):
+    """병렬로 초기 population 생성."""
+    pop_size = pop.shape[0]
+    
+    for idx in prange(pop_size):
         for i in range(GENOME_SIZE):
             low = bounds[i, 0]
             high = bounds[i, 1]
-            rand_val = get_rand(rng_states, idx)
+            rand_val = np.random.random()
             pop[idx, i] = low + rand_val * (high - low)
 
 
-@cuda.jit
-def legalize_genome_kernel(genome):
-    legalize_genome(genome)
-
-
 # ==========================================
-# 7. Result Classes
+# 6. Result Classes
 # ==========================================
 
 @dataclass
@@ -1120,7 +1133,7 @@ class OptimizationResult:
 
 
 # ==========================================
-# 8. Reporter
+# 7. Reporter
 # ==========================================
 
 class Reporter:
@@ -1157,11 +1170,11 @@ class Reporter:
 
 
 # ==========================================
-# 9. GA Engine Class
+# 8. GA Engine Class
 # ==========================================
 
 class GAEngine:
-    """유전 알고리즘 기반 DCA 전략 최적화 엔진."""
+    """유전 알고리즘 기반 DCA 전략 최적화 엔진 (CPU 병렬화 버전)."""
     
     def __init__(
         self,
@@ -1181,11 +1194,9 @@ class GAEngine:
         
         self.params_dir.mkdir(parents=True, exist_ok=True)
         
-        # GPU 체크
-        if not cuda.is_available():
-            raise RuntimeError("GPU가 필요합니다. CUDA 지원 GPU를 확인해주세요.")
-        
-        self._update_global_constants()
+        # CPU 코어 수 확인
+        self.num_cores = os.cpu_count() or 4
+        print(f"[Info] Using {self.num_cores} CPU cores for parallel processing")
     
     @staticmethod
     def _find_project_root() -> Path:
@@ -1198,30 +1209,8 @@ class GAEngine:
                     return parent
         return start.parent.parent.parent
     
-    def _update_global_constants(self):
-        """GPU 커널에서 사용할 전역 상수 업데이트."""
-        global CONST_INITIAL_CAPITAL, CONST_FEE_RATE, CONST_SLIP_RATE
-        global CONST_FIXED_BASE_MARGIN, CONST_FIXED_DCA_MARGIN
-        global CONST_FIXED_ALLOC_LONG, CONST_FIXED_LEV_LONG, CONST_FIXED_LEV_SHORT
-        global CONST_ABS_CAP_DCA, CONST_DCA_SL_GAP, CONST_LIQ_BUFFER
-        global CONST_MAX_SL_PRICE_CAP, CONST_MIN_SL_PRICE
-        
-        CONST_INITIAL_CAPITAL = self.sim_config.initial_capital
-        CONST_FEE_RATE = self.sim_config.fee_rate
-        CONST_SLIP_RATE = self.sim_config.slip_rate
-        CONST_FIXED_BASE_MARGIN = self.sim_config.fixed_base_margin
-        CONST_FIXED_DCA_MARGIN = self.sim_config.fixed_dca_margin
-        CONST_FIXED_ALLOC_LONG = self.sim_config.fixed_alloc_long
-        CONST_FIXED_LEV_LONG = self.sim_config.fixed_lev_long
-        CONST_FIXED_LEV_SHORT = self.sim_config.fixed_lev_short
-        CONST_ABS_CAP_DCA = self.sim_config.abs_cap_dca
-        CONST_DCA_SL_GAP = self.sim_config.dca_sl_gap
-        CONST_LIQ_BUFFER = self.sim_config.liq_buffer
-        CONST_MAX_SL_PRICE_CAP = self.sim_config.max_sl_price_cap
-        CONST_MIN_SL_PRICE = self.sim_config.min_sl_price
-    
-    def _df_to_gpu(self, df, timeframe: str) -> Dict:
-        """DataFrame을 GPU 배열로 변환."""
+    def _df_to_arrays(self, df, timeframe: str) -> Dict:
+        """DataFrame을 NumPy 배열로 변환."""
         opens = df['Open'].values.astype(np.float32)
         closes = df['Close'].values.astype(np.float32)
         lows = df['Low'].values.astype(np.float32)
@@ -1234,10 +1223,10 @@ class GAEngine:
         bpd = bars_per_day(timeframe)
 
         return {
-            'Open': cuda.to_device(opens),
-            'Close': cuda.to_device(closes),
-            'X1': cuda.to_device(x1.astype(np.float32)),
-            'X2': cuda.to_device(x2.astype(np.float32)),
+            'Open': opens,
+            'Close': closes,
+            'X1': x1.astype(np.float32),
+            'X2': x2.astype(np.float32),
             'Days': float(len(df) / bpd)
         }
     
@@ -1290,16 +1279,28 @@ class GAEngine:
         
         return str(filepath)
     
+    def _legalize_genome_host(self, genome: np.ndarray) -> np.ndarray:
+        """호스트에서 genome 합법화."""
+        cfg = self.sim_config
+        result = genome.copy()
+        legalize_genome(
+            result,
+            cfg.initial_capital, cfg.fixed_alloc_long, cfg.fixed_lev_long, cfg.fixed_lev_short,
+            cfg.fixed_base_margin, cfg.fixed_dca_margin,
+            cfg.fee_rate, cfg.min_sl_price, cfg.dca_sl_gap, cfg.liq_buffer, cfg.max_sl_price_cap
+        )
+        return result
+    
     def optimize_ticker(self, ticker: str) -> Optional[OptimizationResult]:
         """단일 티커에 대한 최적화 수행."""
         cfg = self.sim_config
         ga = self.ga_config
         
-        tpm = float32(trades_per_month(cfg.timeframe))
-        s_interval = int32(sharpe_interval_bars(cfg.timeframe, cfg.sharpe_days))
-        bars_cooldown = int32((cfg.cooldown_hours * 60) / timeframe_minutes(cfg.timeframe))
+        tpm = np.float32(trades_per_month(cfg.timeframe))
+        s_interval = np.int32(sharpe_interval_bars(cfg.timeframe, cfg.sharpe_days))
+        bars_cooldown = np.int32((cfg.cooldown_hours * 60) / timeframe_minutes(cfg.timeframe))
         
-        print(f"\n🚀 Processing {ticker} (Timeframe={cfg.timeframe}, GPU Evolution Mode)...")
+        print(f"\n🚀 Processing {ticker} (Timeframe={cfg.timeframe}, CPU Parallel Mode)...")
         
         df = DataManager.fetch_data(
             ticker,
@@ -1312,20 +1313,21 @@ class GAEngine:
             print(f"⚠️ {ticker}: 데이터 부족, 스킵")
             return None
         
-        d_data = self._df_to_gpu(df, cfg.timeframe)
-        d_bounds = cuda.to_device(PARAM_BOUNDS_HOST)
+        data = self._df_to_arrays(df, cfg.timeframe)
+        bounds = PARAM_BOUNDS_HOST.copy()
+        
+        # 랜덤 시드 설정
+        np.random.seed(int(time.time()) % (2**31))
         
         curr_pop_size = ga.min_pop_size
-        rng_states = create_xoroshiro128p_states(curr_pop_size, seed=int(time.time()))
         
-        d_pop_curr = cuda.device_array((ga.max_pop_size, GENOME_SIZE), dtype=np.float32)
-        d_pop_next = cuda.device_array((ga.max_pop_size, GENOME_SIZE), dtype=np.float32)
-        d_results = cuda.device_array((ga.max_pop_size, 5), dtype=np.float32)
-        d_sorted_indices = cuda.device_array(ga.max_pop_size, dtype=np.int32)
+        # Population 초기화
+        pop_curr = np.zeros((ga.max_pop_size, GENOME_SIZE), dtype=np.float32)
+        pop_next = np.zeros((ga.max_pop_size, GENOME_SIZE), dtype=np.float32)
+        results = np.zeros((ga.max_pop_size, 5), dtype=np.float32)
         
-        block = 32
-        grid = (curr_pop_size + block - 1) // block
-        init_population_kernel[grid, block](d_pop_curr[:curr_pop_size], d_bounds, rng_states)
+        # 초기 population 생성
+        init_population(pop_curr[:curr_pop_size], bounds)
         
         best_stats = {'fitness': -1e9, 'mpr': 0, 'mdd': 0, 'sharpe': 0}
         best_genome_host = np.zeros(GENOME_SIZE, dtype=np.float32)
@@ -1340,62 +1342,64 @@ class GAEngine:
         
         for gen in pbar:
             final_gen = gen
-            grid = (curr_pop_size + block - 1) // block
             
-            evaluate_kernel[grid, block](
-                d_pop_curr[:curr_pop_size], d_results[:curr_pop_size],
-                d_data['Open'], d_data['Close'], d_data['X1'], d_data['X2'],
-                float32(d_data['Days']),
+            # Population 평가 (병렬)
+            evaluate_population(
+                pop_curr[:curr_pop_size], results[:curr_pop_size],
+                data['Open'], data['Close'], data['X1'], data['X2'],
+                np.float32(data['Days']),
                 tpm,
                 s_interval,
-                bars_cooldown
+                bars_cooldown,
+                np.float32(cfg.initial_capital),
+                np.float32(cfg.fee_rate),
+                np.float32(cfg.slip_rate),
+                np.float32(cfg.fixed_base_margin),
+                np.float32(cfg.fixed_dca_margin),
+                np.float32(cfg.fixed_alloc_long),
+                np.int32(cfg.fixed_lev_long),
+                np.int32(cfg.fixed_lev_short),
+                np.float32(cfg.min_sl_price),
+                np.float32(cfg.dca_sl_gap),
+                np.float32(cfg.liq_buffer),
+                np.float32(cfg.max_sl_price_cap)
             )
             
-            h_results = d_results[:curr_pop_size].copy_to_host()
-            fitness_scores = h_results[:, 0]
+            fitness_scores = results[:curr_pop_size, 0]
+            sorted_indices = np.argsort(fitness_scores)[::-1].astype(np.int32)
             
-            sorted_indices_host = np.argsort(fitness_scores)[::-1].astype(np.int32)
-            d_sorted_indices[:curr_pop_size].copy_to_device(sorted_indices_host)
-            
-            best_idx = sorted_indices_host[0]
+            best_idx = sorted_indices[0]
             curr_best_fit = fitness_scores[best_idx]
             
             if curr_best_fit > best_stats['fitness']:
                 best_stats['fitness'] = curr_best_fit
-                best_stats['mpr'] = h_results[best_idx, 2]
-                best_stats['mdd'] = h_results[best_idx, 3]
-                best_stats['sharpe'] = h_results[best_idx, 4]
+                best_stats['mpr'] = results[best_idx, 2]
+                best_stats['mdd'] = results[best_idx, 3]
+                best_stats['sharpe'] = results[best_idx, 4]
                 
-                best_genome_host = d_pop_curr[best_idx].copy_to_host()
+                best_genome_host = pop_curr[best_idx].copy()
                 patience = 0
                 
                 if curr_pop_size > ga.min_pop_size:
-                    d_pop_curr[0] = d_pop_curr[best_idx]
+                    pop_curr[0] = pop_curr[best_idx]
                     curr_pop_size = ga.min_pop_size
-                    rng_states = create_xoroshiro128p_states(curr_pop_size, seed=int(time.time()))
             else:
                 patience += 1
             
             if curr_pop_size < ga.max_pop_size and patience > 0 and patience % ga.growth_interval == 0:
                 new_size = min(int(curr_pop_size * ga.growth_multiplier), ga.max_pop_size)
                 if new_size > curr_pop_size:
-                    rng_states = create_xoroshiro128p_states(new_size, seed=int(time.time()))
-                    added = new_size - curr_pop_size
-                    grid_add = (added + block - 1) // block
-                    init_population_kernel[grid_add, block](d_pop_curr[curr_pop_size:new_size], d_bounds, rng_states)
+                    # 새로운 개체 추가
+                    init_population(pop_curr[curr_pop_size:new_size], bounds)
                     curr_pop_size = new_size
             
             # 체크포인트
             if patience == ga.max_patience_limit // 2:
-                temp_genome = cuda.to_device(best_genome_host)
-                legalize_genome_kernel[1, 1](temp_genome)
-                converted_genome = temp_genome.copy_to_host()
+                converted_genome = self._legalize_genome_host(best_genome_host)
                 Reporter.print_checkpoint(ticker, gen, converted_genome, best_stats, cfg)
                 
-                d_pop_curr[0] = d_pop_curr[best_idx]
-                rng_states = create_xoroshiro128p_states(curr_pop_size, seed=int(time.time()))
-                grid_full = (curr_pop_size + block - 1) // block
-                init_population_kernel[grid_full, block](d_pop_curr[1:curr_pop_size], d_bounds, rng_states)
+                pop_curr[0] = pop_curr[best_idx]
+                init_population(pop_curr[1:curr_pop_size], bounds)
             
             if patience >= ga.max_patience_limit:
                 break
@@ -1407,20 +1411,23 @@ class GAEngine:
             if elite_count < 1:
                 elite_count = 1
             
-            grid = (curr_pop_size + block - 1) // block
-            evolve_kernel[grid, block](
-                rng_states,
-                d_pop_curr[:curr_pop_size],
-                d_pop_next[:curr_pop_size],
-                d_results[:curr_pop_size],
-                d_bounds,
-                float32(mut_rate),
-                d_sorted_indices,
-                int32(elite_count),
-                int32(curr_pop_size)
+            # 진화 (병렬)
+            # sorted_indices를 max_pop_size 크기로 확장
+            full_sorted_indices = np.zeros(ga.max_pop_size, dtype=np.int32)
+            full_sorted_indices[:curr_pop_size] = sorted_indices
+            
+            evolve_population(
+                pop_curr[:curr_pop_size],
+                pop_next[:curr_pop_size],
+                results[:curr_pop_size],
+                bounds,
+                np.float32(mut_rate),
+                full_sorted_indices,
+                np.int32(elite_count),
+                np.int32(curr_pop_size)
             )
             
-            d_pop_curr, d_pop_next = d_pop_next, d_pop_curr
+            pop_curr, pop_next = pop_next, pop_curr
             
             pbar.set_description(
                 f"Pop: {curr_pop_size} | MPR: {best_stats['mpr']:.1f}% | "
@@ -1428,23 +1435,17 @@ class GAEngine:
             )
             
             if gen % 100 == 0:
-                temp_genome = cuda.to_device(best_genome_host)
-                legalize_genome_kernel[1, 1](temp_genome)
-                converted_genome = temp_genome.copy_to_host()
+                converted_genome = self._legalize_genome_host(best_genome_host)
                 Reporter.print_checkpoint(ticker, gen, converted_genome, best_stats, cfg)
         
         # 최종 결과
         tqdm.write(f"\n🏁 Finished: {ticker}")
-        temp_genome = cuda.to_device(best_genome_host)
-        legalize_genome_kernel[1, 1](temp_genome)
-        final_genome = temp_genome.copy_to_host()
+        final_genome = self._legalize_genome_host(best_genome_host)
         Reporter.print_checkpoint(ticker, final_gen, final_genome, best_stats, cfg)
         
         # 결과 생성
         result = self._genome_to_result(ticker, final_genome, best_stats, final_gen)
         
-        # 정리
-        del d_pop_curr, d_pop_next, d_results, d_data, rng_states, d_sorted_indices, d_bounds
         gc.collect()
         
         return result
@@ -1477,7 +1478,7 @@ class GAEngine:
 
 
 # ==========================================
-# 10. Entry Point
+# 9. Entry Point
 # ==========================================
 
 def main():
@@ -1488,12 +1489,12 @@ def main():
         data_years=5,
     )
     
-    ga_config = GAConfig(
-        tickers=("DOGE/USDT", "ZEC/USDT", "SUI/USDT", "ETH/USDT", "BTC/USDT", "SOL/USDT"),
-    )
+    ga_config = GAConfig()
+    
+    tickers = ("DOGE/USDT", "ZEC/USDT", "SUI/USDT", "ETH/USDT", "BTC/USDT", "SOL/USDT")
     
     engine = GAEngine(sim_config=sim_config, ga_config=ga_config)
-    results = engine.run()
+    results = engine.run(tickers=tickers)
     
     print(f"\n🎉 최적화 완료! 총 {len(results)}개 티커 처리됨.")
 
