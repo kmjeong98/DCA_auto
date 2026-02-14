@@ -8,7 +8,7 @@ import math
 import os
 import time
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -941,11 +941,7 @@ def evaluate_population(
         if sharpe > 0:
             sharpe_mult = 1.0 + (sharpe * 10.0)
 
-        fit = 0.0
-        if mpr > 0.0:
-            fit = (1 / risk_factor) * pen * sharpe_mult
-        else:
-            fit = (mpr * risk_factor) * pen
+        fit = (1 / risk_factor) * pen * sharpe_mult
 
         results[idx, 0] = fit
         results[idx, 1] = r
@@ -1453,10 +1449,10 @@ class GAEngine:
         
         return result
     
-    def run(self, tickers: Optional[List[str]] = None) -> Dict[str, OptimizationResult]:
+    def run(self, tickers: List[str]) -> Dict[str, OptimizationResult]:
         """모든 티커에 대해 최적화 실행 및 결과 저장."""
         if not tickers:
-            raise ValueError("tickers 파라미터는 필수입니다. run(tickers=['BTC/USDT', ...])")
+            raise ValueError("tickers 리스트가 비어있습니다.")
         
         cfg = self.sim_config
         tpm = trades_per_month(cfg.timeframe)
@@ -1478,29 +1474,3 @@ class GAEngine:
                 print(f"✅ {ticker} 파라미터 저장완료: {filepath}")
         
         return results
-
-
-# ==========================================
-# 9. Entry Point
-# ==========================================
-
-def main():
-    """메인 실행 함수."""
-    # 기본 설정으로 엔진 생성
-    sim_config = SimulationConfig(
-        timeframe="1m",
-        data_years=5,
-    )
-    
-    ga_config = GAConfig()
-    
-    tickers = ("DOGE/USDT", "ZEC/USDT", "SUI/USDT", "ETH/USDT", "BTC/USDT", "SOL/USDT")
-    
-    engine = GAEngine(sim_config=sim_config, ga_config=ga_config)
-    results = engine.run(tickers=tickers)
-    
-    print(f"\n🎉 최적화 완료! 총 {len(results)}개 티커 처리됨.")
-
-
-if __name__ == "__main__":
-    main()
