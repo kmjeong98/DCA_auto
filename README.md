@@ -1,3 +1,10 @@
+# Prompt
+```bash
+git clone https://github.com/kmjeong98/DCA_auto.git
+cd DCA_auto
+```
+
+
 # DCA_auto
 
 이 프로젝트는 M4 Mac mini에서 구동할 에이전트입니다.
