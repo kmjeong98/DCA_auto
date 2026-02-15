@@ -1382,7 +1382,7 @@ class GAEngine:
                 if curr_pop_size > ga.min_pop_size:
                     pop_curr[0] = pop_curr[best_idx]
                     curr_pop_size = ga.min_pop_size
-                    eval_pop_size = curr_pop_size
+                    # eval_pop_size는 변경하지 않음 - sorted_indices가 이미 원래 크기로 계산됨
             else:
                 patience += 1
             
