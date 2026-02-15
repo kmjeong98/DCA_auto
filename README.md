@@ -19,7 +19,6 @@ cd DCA_auto
 
 ## Optimize 실행 prompt
 ```bash
-cd /path/to/DCA_auto
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
