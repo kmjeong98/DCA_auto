@@ -12,6 +12,9 @@ load_dotenv()
 class APIClient:
     """Binance Futures API 클라이언트 (ccxt 기반)."""
 
+    # Testnet URLs
+    TESTNET_BASE = "https://testnet.binancefuture.com"
+
     def __init__(self, testnet: bool = True) -> None:
         """
         API 클라이언트 초기화.
@@ -27,16 +30,6 @@ class APIClient:
             "adjustForTimeDifference": True,
         }
 
-        if testnet:
-            options["urls"] = {
-                "api": {
-                    "public": "https://testnet.binancefuture.com/fapi/v1",
-                    "private": "https://testnet.binancefuture.com/fapi/v1",
-                    "fapiPublic": "https://testnet.binancefuture.com/fapi/v1",
-                    "fapiPrivate": "https://testnet.binancefuture.com/fapi/v1",
-                }
-            }
-
         self.exchange = ccxt.binance({
             "apiKey": api_key,
             "secret": api_secret,
@@ -44,8 +37,12 @@ class APIClient:
             "options": options,
         })
 
+        # Testnet URL 직접 설정 (sandbox mode 대신)
         if testnet:
-            self.exchange.set_sandbox_mode(True)
+            self.exchange.urls["api"]["fapiPublic"] = self.TESTNET_BASE + "/fapi/v1"
+            self.exchange.urls["api"]["fapiPrivate"] = self.TESTNET_BASE + "/fapi/v1"
+            self.exchange.urls["api"]["fapiPublicV2"] = self.TESTNET_BASE + "/fapi/v2"
+            self.exchange.urls["api"]["fapiPrivateV2"] = self.TESTNET_BASE + "/fapi/v2"
 
         self.testnet = testnet
         self._markets_loaded = False
@@ -100,6 +97,7 @@ class APIClient:
         Returns:
             API 응답
         """
+        self._ensure_markets()
         try:
             return self.exchange.fapiPrivatePostPositionSideDual({
                 "dualSidePosition": "true" if hedge_mode else "false"
