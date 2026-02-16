@@ -135,6 +135,15 @@ ABSOLUTE_MIN_TRADES = 10.0
 # 상수 캡
 ABS_CAP_DCA_CONST = 15
 
+# 파라미터 비교용 반올림 정밀도 (표시 단위와 일치)
+# Price Deviation, Take Profit, Stop Loss: 소수점 4자리 (0.0099 = 0.99%)
+# Dev/Vol Multiplier: 소수점 2자리 (x1.51)
+# Max DCA: 정수
+PARAM_ROUND_PRECISION = np.array([
+    4, 4, 0, 2, 2, 4,  # Long: dev, tp, max_dca, dev_mult, vol_mult, sl
+    4, 4, 0, 2, 2, 4,  # Short: dev, tp, max_dca, dev_mult, vol_mult, sl
+], dtype=np.int32)
+
 
 # ==========================================
 # 3. Simulation Logic (JIT Functions)
@@ -843,12 +852,29 @@ def validate_and_fix_side(
 
 
 @njit(cache=True, fastmath=True)
+def round_genome_inplace(genome):
+    """genome 파라미터를 표시 정밀도에 맞게 반올림 (in-place)."""
+    for i in range(GENOME_SIZE):
+        prec = PARAM_ROUND_PRECISION[i]
+        if prec == 0:
+            # 정수형 파라미터 (Max DCA)
+            genome[i] = np.float32(int(genome[i] + 0.5))
+        else:
+            # 실수형 파라미터 - 해당 자릿수로 반올림
+            factor = 10.0 ** prec
+            genome[i] = np.float32(int(genome[i] * factor + 0.5) / factor)
+
+
+@njit(cache=True, fastmath=True)
 def legalize_genome(
     genome,
     initial_capital, fixed_alloc_long, fixed_lev_long, fixed_lev_short,
     fixed_base_margin, fixed_dca_margin,
     fee_rate, min_sl_price, dca_sl_gap, liq_buffer, max_sl_price_cap
 ):
+    # 먼저 파라미터를 표시 정밀도로 반올림
+    round_genome_inplace(genome)
+    
     # Long
     l_alloc = fixed_alloc_long * initial_capital
     l_res_dca, l_res_sl = validate_and_fix_side(
@@ -884,6 +910,15 @@ def legalize_genome(
     )
     genome[P_S_MAX_DCA] = np.float32(s_res_dca)
     genome[P_S_SL_RATIO] = np.float32(s_res_sl)
+    
+    # Max DCA와 SL도 반올림 (validate_and_fix_side에서 계산된 값)
+    genome[P_L_MAX_DCA] = np.float32(int(genome[P_L_MAX_DCA] + 0.5))
+    genome[P_S_MAX_DCA] = np.float32(int(genome[P_S_MAX_DCA] + 0.5))
+    
+    # SL은 소수점 4자리로 반올림
+    factor = 10000.0
+    genome[P_L_SL_RATIO] = np.float32(int(genome[P_L_SL_RATIO] * factor + 0.5) / factor)
+    genome[P_S_SL_RATIO] = np.float32(int(genome[P_S_SL_RATIO] * factor + 0.5) / factor)
 
 
 # ==========================================
@@ -1023,6 +1058,31 @@ def evolve_population(old_pop, new_pop, fitness, bounds, mut_rate, sorted_indice
                 val = mutate_gene(val, i, bounds, np.random.random())
 
             new_pop[tid, i] = val
+
+
+@njit(cache=True, fastmath=True)
+def round_genome_for_comparison(genome):
+    """파라미터 비교를 위해 표시 정밀도에 맞게 genome 반올림."""
+    rounded = np.zeros(GENOME_SIZE, dtype=np.float32)
+    for i in range(GENOME_SIZE):
+        prec = PARAM_ROUND_PRECISION[i]
+        if prec == 0:
+            # 정수형 파라미터 (Max DCA)
+            rounded[i] = np.float32(int(genome[i] + 0.5))
+        else:
+            # 실수형 파라미터 - 해당 자릿수로 반올림
+            factor = 10.0 ** prec
+            rounded[i] = np.float32(int(genome[i] * factor + 0.5) / factor)
+    return rounded
+
+
+@njit(cache=True, fastmath=True)
+def genomes_are_equal(genome1, genome2):
+    """두 genome이 동일한지 비교 (legalize된 genome 기준 - 이미 반올림됨)."""
+    for i in range(GENOME_SIZE):
+        if genome1[i] != genome2[i]:
+            return False
+    return True
 
 
 @njit(parallel=True, cache=True)
@@ -1369,22 +1429,42 @@ class GAEngine:
             
             best_idx = sorted_indices[0]
             curr_best_fit = fitness_scores[best_idx]
+            curr_best_genome = pop_curr[best_idx].copy()
             
-            if curr_best_fit > best_stats['fitness']:
+            # Legalize current best genome for comparison
+            curr_best_legalized = curr_best_genome.copy()
+            legalize_genome(
+                curr_best_legalized,
+                cfg.initial_capital, cfg.fixed_alloc_long, cfg.fixed_lev_long, cfg.fixed_lev_short,
+                cfg.fixed_base_margin, cfg.fixed_dca_margin,
+                cfg.fee_rate, cfg.min_sl_price, cfg.dca_sl_gap, cfg.liq_buffer, cfg.max_sl_price_cap
+            )
+            
+            # 첫 세대이거나 best_genome_host가 초기 상태인 경우
+            if gen == 1 or np.sum(np.abs(best_genome_host)) == 0:
                 best_stats['fitness'] = curr_best_fit
                 best_stats['mpr'] = results[best_idx, 2]
                 best_stats['mdd'] = results[best_idx, 3]
                 best_stats['sharpe'] = results[best_idx, 4]
-                
-                best_genome_host = pop_curr[best_idx].copy()
+                best_genome_host = curr_best_legalized.copy()
                 patience = 0
-                
-                if curr_pop_size > ga.min_pop_size:
-                    pop_curr[0] = pop_curr[best_idx]
-                    curr_pop_size = ga.min_pop_size
-                    # eval_pop_size는 변경하지 않음 - sorted_indices가 이미 원래 크기로 계산됨
             else:
-                patience += 1
+                # 현재 세대 1등과 이전 best의 파라미터가 동일한지 비교
+                if genomes_are_equal(curr_best_legalized, best_genome_host):
+                    # 파라미터가 같으면 patience 증가
+                    patience += 1
+                else:
+                    # 파라미터가 다르면 새로운 best로 업데이트하고 patience 리셋
+                    best_stats['fitness'] = curr_best_fit
+                    best_stats['mpr'] = results[best_idx, 2]
+                    best_stats['mdd'] = results[best_idx, 3]
+                    best_stats['sharpe'] = results[best_idx, 4]
+                    best_genome_host = curr_best_legalized.copy()
+                    patience = 0
+                    
+                    if curr_pop_size > ga.min_pop_size:
+                        pop_curr[0] = pop_curr[best_idx]
+                        curr_pop_size = ga.min_pop_size
             
             # 체크포인트
             if patience == ga.max_patience_limit // 2:
