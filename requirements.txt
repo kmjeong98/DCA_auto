@@ -5,3 +5,5 @@ numba
 tabulate
 tqdm
 ccxt
+python-dotenv
+websocket-client
