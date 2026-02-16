@@ -5,3 +5,4 @@ __pycache__/
 logs/
 .vscode/
 .DS_Store
+params/
