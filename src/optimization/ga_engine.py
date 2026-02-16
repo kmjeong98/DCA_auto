@@ -94,7 +94,7 @@ class SimulationConfig:
 class GAConfig:
     """유전 알고리즘 설정."""
     min_pop_size: int = 2000
-    max_pop_size: int = 4000
+    max_pop_size: int = 5000
     
     elite_ratio: float = 0.05
     
