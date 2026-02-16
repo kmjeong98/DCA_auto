@@ -98,11 +98,11 @@ class GAConfig:
     
     elite_ratio: float = 0.05
     
-    growth_interval: int = 10
+    growth_interval: int = 5
     growth_multiplier: float = 1.10
     
     max_generations: int = 50000
-    max_patience_limit: int = 100
+    max_patience_limit: int = 50
     
     tournament_size: int = 3
 
