@@ -90,13 +90,10 @@ class SymbolTrader:
         except Exception as e:
             self.logger.warning(f"Margin mode setting: {e}")
 
-        # 레버리지 설정 (Binance는 심볼당 1개 → max 사용)
-        long_lev = self.strategy.get_leverage("long")
-        short_lev = self.strategy.get_leverage("short")
-        max_lev = max(long_lev, short_lev)
-
+        # 레버리지 설정
+        lev = self.strategy.leverage
         try:
-            self.api.set_leverage(self.symbol, max_lev)
+            self.api.set_leverage(self.symbol, lev)
         except Exception as e:
             self.logger.warning(f"Leverage setting: {e}")
 
@@ -119,7 +116,7 @@ class SymbolTrader:
         self._initialized = True
         self.logger.info(
             f"Initialized {self.symbol} - Capital: ${self.capital:.2f}, "
-            f"Leverage: {max_lev}x (L:{long_lev}/S:{short_lev})"
+            f"Leverage: {lev}x"
         )
 
     def _sync_with_exchange(self) -> None:
@@ -195,17 +192,14 @@ class SymbolTrader:
             self._save_active_params(new_params)
 
             # 레버리지 재설정 (변경 가능)
-            long_lev = self.strategy.get_leverage("long")
-            short_lev = self.strategy.get_leverage("short")
-            max_lev = max(long_lev, short_lev)
+            lev = self.strategy.leverage
             try:
-                self.api.set_leverage(self.symbol, max_lev)
+                self.api.set_leverage(self.symbol, lev)
             except Exception:
                 pass
 
             self.logger.info(
-                f"Params updated for {self.symbol} "
-                f"(leverage: {max_lev}x L:{long_lev}/S:{short_lev})"
+                f"Params updated for {self.symbol} (leverage: {lev}x)"
             )
         except Exception as e:
             self.logger.error(f"Params update error: {e}")
