@@ -1305,6 +1305,70 @@ class GAEngine:
         )
         return result
     
+    def _params_to_genome(self, params: Dict) -> np.ndarray:
+        """저장된 파라미터 JSON을 genome 배열로 변환."""
+        genome = np.zeros(GENOME_SIZE, dtype=np.float32)
+        lp = params["parameters"]["long"]
+        sp = params["parameters"]["short"]
+
+        genome[P_L_PRICE_DEVIATION] = lp["price_deviation"]
+        genome[P_L_TAKE_PROFIT] = lp["take_profit"]
+        genome[P_L_MAX_DCA] = float(lp["max_dca"])
+        genome[P_L_DEV_MULT] = lp["dev_multiplier"]
+        genome[P_L_VOL_MULT] = lp["vol_multiplier"]
+        genome[P_L_SL_RATIO] = lp["stop_loss"]
+
+        genome[P_S_PRICE_DEVIATION] = sp["price_deviation"]
+        genome[P_S_TAKE_PROFIT] = sp["take_profit"]
+        genome[P_S_MAX_DCA] = float(sp["max_dca"])
+        genome[P_S_DEV_MULT] = sp["dev_multiplier"]
+        genome[P_S_VOL_MULT] = sp["vol_multiplier"]
+        genome[P_S_SL_RATIO] = sp["stop_loss"]
+
+        return genome
+
+    def _evaluate_genome(self, genome: np.ndarray, data: Dict) -> Dict:
+        """단일 genome을 현재 데이터로 평가하여 stats 반환."""
+        cfg = self.sim_config
+        tpm = np.float32(trades_per_month(cfg.timeframe))
+        s_interval = np.int32(sharpe_interval_bars(cfg.timeframe, cfg.sharpe_days))
+        bars_cooldown = np.int32((cfg.cooldown_hours * 60) / timeframe_minutes(cfg.timeframe))
+        n_bars = data['Open'].shape[0]
+        days = float(data['Days'])
+
+        legalized = self._legalize_genome_host(genome)
+
+        r, mdd, _, num, _, sharpe = run_dual_simulation(
+            data['Open'], data['Close'], data['X1'], data['X2'],
+            legalized, n_bars, s_interval, bars_cooldown,
+            np.float32(cfg.initial_capital),
+            np.float32(cfg.fee_rate),
+            np.float32(cfg.slip_rate),
+            np.float32(cfg.fixed_base_margin),
+            np.float32(cfg.fixed_dca_margin),
+            np.int32(cfg.fixed_leverage),
+        )
+
+        months = days / 30.0
+        if months < 0.1:
+            months = 0.1
+        mpr = r / months if months > 0 else 0.0
+
+        req = months * tpm
+        if req < ABSOLUTE_MIN_TRADES:
+            req = ABSOLUTE_MIN_TRADES
+        pen = 1.0
+        if num < req:
+            pen *= (num / req)
+
+        risk_factor = 1.0 + (mdd / 50.0) ** 2
+        sharpe_mult = 1.0
+        if sharpe > 0:
+            sharpe_mult = 1.0 + (sharpe * 10.0)
+        fitness = (1 / risk_factor) * pen * sharpe_mult
+
+        return {'fitness': fitness, 'mpr': mpr, 'mdd': mdd, 'sharpe': sharpe}
+
     def optimize_ticker(self, ticker: str) -> Optional[OptimizationResult]:
         """단일 티커에 대한 최적화 수행."""
         cfg = self.sim_config
@@ -1500,13 +1564,53 @@ class GAEngine:
         print(f"[Config] Params will be saved to: {self.params_dir}")
         
         results = {}
-        
+
         for ticker in tickers:
             result = self.optimize_ticker(ticker)
-            
+
             if result:
+                # 기존 파라미터가 있으면 재평가 후 비교
+                safe_name = ticker.replace("/", "_")
+                existing_path = self.params_dir / f"{safe_name}.json"
+
+                if existing_path.exists():
+                    try:
+                        with open(existing_path, 'r', encoding='utf-8') as f:
+                            existing_params = json.load(f)
+
+                        # 기존 파라미터를 현재 데이터로 재평가
+                        data = self._df_to_arrays(
+                            DataManager.fetch_data(
+                                ticker,
+                                timeframe=cfg.timeframe,
+                                years=cfg.data_years,
+                                start_date_str=cfg.start_date_str,
+                            ),
+                            cfg.timeframe,
+                        )
+                        existing_genome = self._params_to_genome(existing_params)
+                        existing_stats = self._evaluate_genome(existing_genome, data)
+
+                        print(f"\n📊 {ticker} 기존 파라미터 재평가:")
+                        print(f"   기존: fitness={existing_stats['fitness']:.4f}, "
+                              f"MPR={existing_stats['mpr']:.2f}%, "
+                              f"MDD={existing_stats['mdd']:.2f}%, "
+                              f"Sharpe={existing_stats['sharpe']:.3f}")
+                        print(f"   신규: fitness={result.fitness:.4f}, "
+                              f"MPR={result.mpr:.2f}%, "
+                              f"MDD={result.mdd:.2f}%, "
+                              f"Sharpe={result.sharpe:.3f}")
+
+                        if result.fitness <= existing_stats['fitness']:
+                            print(f"⏭️  {ticker} 신규 파라미터가 기존보다 낮아 저장하지 않음")
+                            continue
+
+                        print(f"⬆️  {ticker} 신규 파라미터가 더 우수 → 저장")
+                    except Exception as e:
+                        print(f"⚠️ {ticker} 기존 파라미터 재평가 실패: {e} → 신규 저장")
+
                 filepath = self._save_result(result)
                 results[ticker] = result
                 print(f"✅ {ticker} 파라미터 저장완료: {filepath}")
-        
+
         return results
