@@ -10,7 +10,7 @@ Long/Short 동시 운영, GA 최적화 파라미터 기반 자동 진입/DCA/TP/
 DCA_auto/
 ├── main_trading.py              # 실전 매매 진입점 (PM2 구동)
 ├── main_optimize.py             # GA 최적화 실행
-├── config.json                  # 트레이딩 설정 (코인별 weight, cooldown)
+├── config.example.json           # 트레이딩 설정 템플릿 (cp → config.json)
 ├── ecosystem.config.js          # PM2 실행 설정 (가상환경 interpreter 지정)
 ├── requirements.txt
 ├── .env.example
@@ -102,7 +102,7 @@ GA 최적화로 결정된 `price_deviation`, `dev_multiplier`, `vol_multiplier`�
 
 모든 포지션은 Cross 마진으로 운영합니다. 지갑 잔고를 공유하므로 개별 포지션이 단독으로 청산되지 않습니다.
 
-레버리지는 심볼당 하나만 설정 가능하므로, Long/Short 중 큰 값(`max(long_lev, short_lev)`)을 거래소에 설정하고 전략 내부에서는 각 방향의 레버리지를 별도로 사용합니다.
+Binance Futures는 심볼당 레버리지 하나만 지원하므로, Long/Short 동일한 레버리지를 사용합니다.
 
 ### 마진 영속화 (MarginManager)
 
@@ -123,10 +123,11 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. 환경 변수
+### 2. 환경 변수 및 설정 파일
 
 ```bash
 cp .env.example .env
+cp config.example.json config.json
 ```
 
 `.env` 파일에 API 키를 설정합니다:
@@ -137,6 +138,8 @@ BINANCE_API_SECRET=your_api_secret_here
 USE_TESTNET=true
 ```
 
+`config.json`에서 거래할 코인과 자본 비율을 설정합니다. 심볼 이름은 `data/params/`의 파일명과 일치해야 합니다.
+
 ### 3. GA 최적화 (파라미터 생성)
 
 ```bash
@@ -144,10 +147,6 @@ python3 main_optimize.py
 ```
 
 결과는 `data/params/`에 코인별 JSON으로 저장됩니다. 이 파일이 없으면 매매를 시작할 수 없습니다.
-
-### 4. config.json 설정
-
-거래할 코인과 자본 비율을 설정합니다. 심볼 이름은 `data/params/`의 파일명과 일치해야 합니다.
 
 ## 실행
 
