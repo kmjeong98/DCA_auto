@@ -75,9 +75,7 @@ class SimulationConfig:
     fixed_base_margin: float = 5.0
     fixed_dca_margin: float = 5.0
     
-    fixed_alloc_long: float = 0.6
-    fixed_lev_long: int = 25
-    fixed_lev_short: int = 20
+    fixed_leverage: int = 25
     
     cooldown_hours: int = 6
     sharpe_days: int = 14
@@ -152,27 +150,23 @@ PARAM_ROUND_PRECISION = np.array([
 @njit(cache=True, fastmath=True)
 def _update_mdd_mark_to_market(
     mark_p,
-    l_balance, l_amt, l_cost, l_lev,
-    s_balance, s_amt, s_cost, s_lev,
+    balance, l_amt, l_cost, s_amt, s_cost, lev,
     peak_equity, max_dd,
     initial_capital
 ):
-    l_eq = l_balance
+    equity = balance
     if l_amt > 0.0:
         l_val = l_amt * mark_p
-        l_eq += l_cost + (l_val - (l_cost * l_lev))
+        equity += l_cost + (l_val - (l_cost * lev))
 
-    s_eq = s_balance
     if s_amt > 0.0:
         s_val = s_amt * mark_p
-        s_eq += s_cost + ((s_cost * s_lev) - s_val)
+        equity += s_cost + ((s_cost * lev) - s_val)
 
-    combined = l_eq + s_eq
+    if equity > peak_equity:
+        peak_equity = equity
 
-    if combined > peak_equity:
-        peak_equity = combined
-
-    dd = (peak_equity - combined) / initial_capital
+    dd = (peak_equity - equity) / initial_capital
     if dd > max_dd:
         max_dd = dd
 
@@ -183,13 +177,9 @@ def _update_mdd_mark_to_market(
 def run_dual_simulation(
     opens, closes, x1s, x2s, params, n_bars, sharpe_interval, cooldown_bars,
     initial_capital, fee_rate, slip_rate, fixed_base_margin, fixed_dca_margin,
-    fixed_alloc_long, fixed_lev_long, fixed_lev_short
+    fixed_leverage
 ):
-    long_ratio = fixed_alloc_long
-    short_ratio = 1.0 - long_ratio
-
-    l_lev = fixed_lev_long
-    s_lev = fixed_lev_short
+    lev = fixed_leverage
 
     # 파라미터 로딩
     l_dev = params[P_L_PRICE_DEVIATION]
@@ -211,19 +201,18 @@ def run_dual_simulation(
     l_sl_target = params[P_L_SL_RATIO]
     s_sl_target = params[P_S_SL_RATIO]
 
-    l_balance = initial_capital * long_ratio
-    s_balance = initial_capital * short_ratio
+    balance = initial_capital
 
     # 초기 진입 자금 확인
     l_active = True
-    l_start_fee = (l_base_m * l_lev) * fee_rate
-    if (l_base_m + l_start_fee) > l_balance:
+    l_start_fee = (l_base_m * lev) * fee_rate
+    if (l_base_m + l_start_fee) > balance:
         l_active = False
         l_max_dca = 0
 
     s_active = True
-    s_start_fee = (s_base_m * s_lev) * fee_rate
-    if (s_base_m + s_start_fee) > s_balance:
+    s_start_fee = (s_base_m * lev) * fee_rate
+    if (l_base_m + l_start_fee + s_base_m + s_start_fee) > balance:
         s_active = False
         s_max_dca = 0
 
@@ -260,9 +249,6 @@ def run_dual_simulation(
             curr_vol *= s_vol_mult
 
     # 변수 초기화
-    l_start_cap = l_balance
-    s_start_cap = s_balance
-
     l_amt, l_cost, l_avg, l_dca_cnt = 0.0, 0.0, 0.0, 0
     l_base_price = 0.0
 
@@ -289,32 +275,31 @@ def run_dual_simulation(
         trigger_p = start_open
         fill_p = trigger_p * (1.0 + slip_rate)
 
-        notional = l_base_m * l_lev
+        notional = l_base_m * lev
         fee = notional * fee_rate
 
-        l_balance -= (l_base_m + fee)
+        balance -= (l_base_m + fee)
         l_amt = notional / fill_p
         l_cost = l_base_m
-        l_avg = (l_cost * l_lev) / l_amt
+        l_avg = (l_cost * lev) / l_amt
         l_base_price = fill_p
 
     if s_active:
         trigger_p = start_open
         fill_p = trigger_p * (1.0 - slip_rate)
 
-        notional = s_base_m * s_lev
+        notional = s_base_m * lev
         fee = notional * fee_rate
 
-        s_balance -= (s_base_m + fee)
+        balance -= (s_base_m + fee)
         s_amt = notional / fill_p
         s_cost = s_base_m
-        s_avg = (s_cost * s_lev) / s_amt
+        s_avg = (s_cost * lev) / s_amt
         s_base_price = fill_p
 
     peak_combined_equity, max_dd = _update_mdd_mark_to_market(
         start_open,
-        l_balance, l_amt, l_cost, l_lev,
-        s_balance, s_amt, s_cost, s_lev,
+        balance, l_amt, l_cost, s_amt, s_cost, lev,
         peak_combined_equity, max_dd,
         initial_capital
     )
@@ -331,15 +316,15 @@ def run_dual_simulation(
             trigger_p = curr_open
             fill_p = trigger_p * (1.0 + slip_rate)
             margin = l_base_m
-            notional = margin * l_lev
+            notional = margin * lev
             fee = notional * fee_rate
             req_cash = margin + fee
 
-            if l_balance >= req_cash:
-                l_balance -= req_cash
+            if balance >= req_cash:
+                balance -= req_cash
                 l_amt = notional / fill_p
                 l_cost = margin
-                l_avg = (l_cost * l_lev) / l_amt
+                l_avg = (l_cost * lev) / l_amt
                 l_dca_cnt = 0
                 l_base_price = fill_p
             else:
@@ -350,15 +335,15 @@ def run_dual_simulation(
             trigger_p = curr_open
             fill_p = trigger_p * (1.0 - slip_rate)
             margin = s_base_m
-            notional = margin * s_lev
+            notional = margin * lev
             fee = notional * fee_rate
             req_cash = margin + fee
 
-            if s_balance >= req_cash:
-                s_balance -= req_cash
+            if balance >= req_cash:
+                balance -= req_cash
                 s_amt = notional / fill_p
                 s_cost = margin
-                s_avg = (s_cost * s_lev) / s_amt
+                s_avg = (s_cost * lev) / s_amt
                 s_dca_cnt = 0
                 s_base_price = fill_p
             else:
@@ -366,8 +351,7 @@ def run_dual_simulation(
 
         peak_combined_equity, max_dd = _update_mdd_mark_to_market(
             curr_open,
-            l_balance, l_amt, l_cost, l_lev,
-            s_balance, s_amt, s_cost, s_lev,
+            balance, l_amt, l_cost, s_amt, s_cost, lev,
             peak_combined_equity, max_dd,
             initial_capital
         )
@@ -390,8 +374,7 @@ def run_dual_simulation(
 
             peak_combined_equity, max_dd = _update_mdd_mark_to_market(
                 start_p,
-                l_balance, l_amt, l_cost, l_lev,
-                s_balance, s_amt, s_cost, s_lev,
+                balance, l_amt, l_cost, s_amt, s_cost, lev,
                 peak_combined_equity, max_dd,
                 initial_capital
             )
@@ -440,17 +423,17 @@ def run_dual_simulation(
 
                     if action == 1:  # DCA
                         margin = l_dca_vols[l_dca_cnt]
-                        notional = margin * l_lev
+                        notional = margin * lev
                         fee = notional * fee_rate
                         req_cash = margin + fee
 
-                        if l_balance >= req_cash:
-                            l_balance -= req_cash
+                        if balance >= req_cash:
+                            balance -= req_cash
                             eff_p = best_p * (1.0 + slip_rate)
                             l_amt += notional / eff_p
                             l_cost += margin
                             l_dca_cnt += 1
-                            l_avg = (l_cost * l_lev) / l_amt
+                            l_avg = (l_cost * lev) / l_amt
 
                             start_p = best_p
                             if is_down:
@@ -460,8 +443,8 @@ def run_dual_simulation(
 
                             peak_combined_equity, max_dd = _update_mdd_mark_to_market(
                                 start_p,
-                                l_balance, l_amt, l_cost, l_lev,
-                                s_balance, s_amt, s_cost, s_lev,
+                                balance, l_amt, l_cost, lev,
+                                balance, s_amt, s_cost, lev,
                                 peak_combined_equity, max_dd,
                                 initial_capital
                             )
@@ -474,8 +457,8 @@ def run_dual_simulation(
 
                             peak_combined_equity, max_dd = _update_mdd_mark_to_market(
                                 best_p,
-                                l_balance, l_amt, l_cost, l_lev,
-                                s_balance, s_amt, s_cost, s_lev,
+                                balance, l_amt, l_cost, lev,
+                                balance, s_amt, s_cost, lev,
                                 peak_combined_equity, max_dd,
                                 initial_capital
                             )
@@ -483,15 +466,15 @@ def run_dual_simulation(
                     else:  # SL or TP
                         exit_fill = best_p * (1.0 - slip_rate)
                         val = l_amt * exit_fill
-                        pnl = val - (l_cost * l_lev)
+                        pnl = val - (l_cost * lev)
                         fee = val * fee_rate
 
                         ret = l_cost + pnl - fee
                         if ret < 0:
                             ret = 0
 
-                        l_balance += ret
-                        l_start_cap = l_balance
+                        balance += ret
+
                         total_trades += 1
 
                         l_amt = 0.0
@@ -500,8 +483,7 @@ def run_dual_simulation(
 
                         peak_combined_equity, max_dd = _update_mdd_mark_to_market(
                             best_p,
-                            l_balance, l_amt, l_cost, l_lev,
-                            s_balance, s_amt, s_cost, s_lev,
+                            balance, l_amt, l_cost, s_amt, s_cost, lev,
                             peak_combined_equity, max_dd,
                             initial_capital
                         )
@@ -512,17 +494,17 @@ def run_dual_simulation(
 
                         elif action == 4:  # Take Profit
                             margin = l_base_m
-                            notional = margin * l_lev
+                            notional = margin * lev
                             fee = notional * fee_rate
                             req_cash = margin + fee
 
-                            if l_balance >= req_cash:
-                                l_balance -= req_cash
+                            if balance >= req_cash:
+                                balance -= req_cash
                                 eff_p = best_p * (1.0 + slip_rate)
 
                                 l_amt = notional / eff_p
                                 l_cost = margin
-                                l_avg = (l_cost * l_lev) / l_amt
+                                l_avg = (l_cost * lev) / l_amt
                                 l_dca_cnt = 0
                                 l_base_price = eff_p
 
@@ -534,8 +516,7 @@ def run_dual_simulation(
 
                                 peak_combined_equity, max_dd = _update_mdd_mark_to_market(
                                     best_p,
-                                    l_balance, l_amt, l_cost, l_lev,
-                                    s_balance, s_amt, s_cost, s_lev,
+                                    balance, l_amt, l_cost, s_amt, s_cost, lev,
                                     peak_combined_equity, max_dd,
                                     initial_capital
                                 )
@@ -587,17 +568,17 @@ def run_dual_simulation(
 
                     if action == 1:  # DCA
                         margin = s_dca_vols[s_dca_cnt]
-                        notional = margin * s_lev
+                        notional = margin * lev
                         fee = notional * fee_rate
                         req_cash = margin + fee
 
-                        if s_balance >= req_cash:
-                            s_balance -= req_cash
+                        if balance >= req_cash:
+                            balance -= req_cash
                             eff_p = best_p * (1.0 - slip_rate)
                             s_amt += notional / eff_p
                             s_cost += margin
                             s_dca_cnt += 1
-                            s_avg = (s_cost * s_lev) / s_amt
+                            s_avg = (s_cost * lev) / s_amt
 
                             start_p = best_p
                             if is_down:
@@ -607,8 +588,8 @@ def run_dual_simulation(
 
                             peak_combined_equity, max_dd = _update_mdd_mark_to_market(
                                 start_p,
-                                l_balance, l_amt, l_cost, l_lev,
-                                s_balance, s_amt, s_cost, s_lev,
+                                balance, l_amt, l_cost, lev,
+                                balance, s_amt, s_cost, lev,
                                 peak_combined_equity, max_dd,
                                 initial_capital
                             )
@@ -621,8 +602,8 @@ def run_dual_simulation(
 
                             peak_combined_equity, max_dd = _update_mdd_mark_to_market(
                                 best_p,
-                                l_balance, l_amt, l_cost, l_lev,
-                                s_balance, s_amt, s_cost, s_lev,
+                                balance, l_amt, l_cost, lev,
+                                balance, s_amt, s_cost, lev,
                                 peak_combined_equity, max_dd,
                                 initial_capital
                             )
@@ -630,15 +611,15 @@ def run_dual_simulation(
                     else:  # SL or TP
                         exit_fill = best_p * (1.0 + slip_rate)
                         val = s_amt * exit_fill
-                        pnl = (s_cost * s_lev) - val
+                        pnl = (s_cost * lev) - val
 
                         fee = val * fee_rate
                         ret = s_cost + pnl - fee
                         if ret < 0:
                             ret = 0
 
-                        s_balance += ret
-                        s_start_cap = s_balance
+                        balance += ret
+
                         total_trades += 1
 
                         s_amt = 0.0
@@ -647,8 +628,7 @@ def run_dual_simulation(
 
                         peak_combined_equity, max_dd = _update_mdd_mark_to_market(
                             best_p,
-                            l_balance, l_amt, l_cost, l_lev,
-                            s_balance, s_amt, s_cost, s_lev,
+                            balance, l_amt, l_cost, s_amt, s_cost, lev,
                             peak_combined_equity, max_dd,
                             initial_capital
                         )
@@ -659,17 +639,17 @@ def run_dual_simulation(
 
                         elif action == 4:  # Take Profit
                             margin = s_base_m
-                            notional = margin * s_lev
+                            notional = margin * lev
                             fee = notional * fee_rate
                             req_cash = margin + fee
 
-                            if s_balance >= req_cash:
-                                s_balance -= req_cash
+                            if balance >= req_cash:
+                                balance -= req_cash
                                 eff_p = best_p * (1.0 - slip_rate)
 
                                 s_amt = notional / eff_p
                                 s_cost = margin
-                                s_avg = (s_cost * s_lev) / s_amt
+                                s_avg = (s_cost * lev) / s_amt
                                 s_dca_cnt = 0
                                 s_base_price = eff_p
 
@@ -681,8 +661,7 @@ def run_dual_simulation(
 
                                 peak_combined_equity, max_dd = _update_mdd_mark_to_market(
                                     best_p,
-                                    l_balance, l_amt, l_cost, l_lev,
-                                    s_balance, s_amt, s_cost, s_lev,
+                                    balance, l_amt, l_cost, s_amt, s_cost, lev,
                                     peak_combined_equity, max_dd,
                                     initial_capital
                                 )
@@ -692,24 +671,19 @@ def run_dual_simulation(
 
             peak_combined_equity, max_dd = _update_mdd_mark_to_market(
                 end_p,
-                l_balance, l_amt, l_cost, l_lev,
-                s_balance, s_amt, s_cost, s_lev,
+                balance, l_amt, l_cost, s_amt, s_cost, lev,
                 peak_combined_equity, max_dd,
                 initial_capital
             )
 
         # Equity Update
-        l_eq = l_balance
+        combined = balance
         if l_amt > 0:
             l_val = l_amt * closes[i]
-            l_eq += l_cost + (l_val - (l_cost * l_lev))
-
-        s_eq = s_balance
+            combined += l_cost + (l_val - (l_cost * lev))
         if s_amt > 0:
             s_val = s_amt * closes[i]
-            s_eq += s_cost + ((s_cost * s_lev) - s_val)
-
-        combined = l_eq + s_eq
+            combined += s_cost + ((s_cost * lev) - s_val)
 
         # Sharpe Sampling
         if sharpe_interval > 0 and ((i + 1) % sharpe_interval == 0):
@@ -721,11 +695,11 @@ def run_dual_simulation(
                 sharpe_cnt += 1
             sharpe_last_equity = combined
 
-    final_equity = l_balance + s_balance
+    final_equity = balance
     if l_amt > 0:
-        final_equity += l_cost + (l_amt * closes[n_bars - 1] - (l_cost * l_lev))
+        final_equity += l_cost + (l_amt * closes[n_bars - 1] - (l_cost * lev))
     if s_amt > 0:
-        final_equity += s_cost + ((s_cost * s_lev) - s_amt * closes[n_bars - 1])
+        final_equity += s_cost + ((s_cost * lev) - s_amt * closes[n_bars - 1])
 
     net_profit = final_equity - initial_capital
     roi = (net_profit / initial_capital) * 100.0
@@ -739,7 +713,7 @@ def run_dual_simulation(
             volatility = math.sqrt(variance)
             sharpe = mean_ret / volatility
 
-    return roi, mdd, net_profit, total_trades, final_equity, long_ratio, sharpe
+    return roi, mdd, net_profit, total_trades, final_equity, sharpe
 
 
 # ==========================================
@@ -868,18 +842,20 @@ def round_genome_inplace(genome):
 @njit(cache=True, fastmath=True)
 def legalize_genome(
     genome,
-    initial_capital, fixed_alloc_long, fixed_lev_long, fixed_lev_short,
+    initial_capital, fixed_leverage,
     fixed_base_margin, fixed_dca_margin,
     fee_rate, min_sl_price, dca_sl_gap, liq_buffer, max_sl_price_cap
 ):
     # 먼저 파라미터를 표시 정밀도로 반올림
     round_genome_inplace(genome)
-    
+
+    # 통합 잔고에서 각 방향이 사용할 수 있는 보수적 한도 (50/50)
+    half_capital = initial_capital * 0.5
+
     # Long
-    l_alloc = fixed_alloc_long * initial_capital
     l_res_dca, l_res_sl = validate_and_fix_side(
-        l_alloc,
-        fixed_lev_long,
+        half_capital,
+        fixed_leverage,
         fixed_base_margin,
         fixed_dca_margin,
         genome[P_L_VOL_MULT],
@@ -894,10 +870,9 @@ def legalize_genome(
     genome[P_L_SL_RATIO] = np.float32(l_res_sl)
 
     # Short
-    s_alloc = (1.0 - fixed_alloc_long) * initial_capital
     s_res_dca, s_res_sl = validate_and_fix_side(
-        s_alloc,
-        fixed_lev_short,
+        half_capital,
+        fixed_leverage,
         fixed_base_margin,
         fixed_dca_margin,
         genome[P_S_VOL_MULT],
@@ -930,7 +905,7 @@ def evaluate_population(
     population, results, opens, closes, x1s, x2s,
     days, trades_per_month_value, sharpe_interval, cooldown_bars,
     initial_capital, fee_rate, slip_rate, fixed_base_margin, fixed_dca_margin,
-    fixed_alloc_long, fixed_lev_long, fixed_lev_short,
+    fixed_leverage,
     min_sl_price, dca_sl_gap, liq_buffer, max_sl_price_cap
 ):
     """병렬로 전체 population 평가."""
@@ -943,15 +918,15 @@ def evaluate_population(
         # Legalize genome
         legalize_genome(
             genome,
-            initial_capital, fixed_alloc_long, fixed_lev_long, fixed_lev_short,
+            initial_capital, fixed_leverage,
             fixed_base_margin, fixed_dca_margin,
             fee_rate, min_sl_price, dca_sl_gap, liq_buffer, max_sl_price_cap
         )
 
-        r, mdd, _, num, _, _, sharpe = run_dual_simulation(
+        r, mdd, _, num, _, sharpe = run_dual_simulation(
             opens, closes, x1s, x2s, genome, n_bars, sharpe_interval, cooldown_bars,
             initial_capital, fee_rate, slip_rate, fixed_base_margin, fixed_dca_margin,
-            fixed_alloc_long, fixed_lev_long, fixed_lev_short
+            fixed_leverage
         )
 
         months = days / 30.0
@@ -1131,10 +1106,7 @@ class OptimizationResult:
     short_stop_loss: float
     
     # 고정값
-    long_allocation: float
-    short_allocation: float
-    long_leverage: int
-    short_leverage: int
+    leverage: int
     base_margin_ratio: float  # initial_capital 대비 비율
     dca_margin_ratio: float   # initial_capital 대비 비율
     
@@ -1178,10 +1150,7 @@ class OptimizationResult:
                 },
             },
             "fixed_settings": {
-                "long_allocation": self.long_allocation,
-                "short_allocation": self.short_allocation,
-                "long_leverage": self.long_leverage,
-                "short_leverage": self.short_leverage,
+                "leverage": self.leverage,
                 "base_margin_ratio": round(self.base_margin_ratio, 6),
                 "dca_margin_ratio": round(self.dca_margin_ratio, 6),
             },
@@ -1198,17 +1167,13 @@ class Reporter:
         if genome is None or stats['mpr'] == 0:
             return
 
-        l_ratio = sim_config.fixed_alloc_long * 100.0
-        s_ratio = (1.0 - sim_config.fixed_alloc_long) * 100.0
-        l_lev = sim_config.fixed_lev_long
-        s_lev = sim_config.fixed_lev_short
+        lev = sim_config.fixed_leverage
 
         l_dca_count = int(genome[P_L_MAX_DCA])
         s_dca_count = int(genome[P_S_MAX_DCA])
 
         table_data = [
-            ["Allocation (Fixed)", f"{l_ratio:.1f}%", f"{s_ratio:.1f}%"],
-            ["Leverage (Fixed)", f"{l_lev}x", f"{s_lev}x"],
+            ["Leverage (Fixed)", f"{lev}x", f"{lev}x"],
             ["Price Deviation", f"{genome[P_L_PRICE_DEVIATION] * 100.0:.2f}%", f"{genome[P_S_PRICE_DEVIATION] * 100.0:.2f}%"],
             ["Take Profit (Avg%)", f"{genome[P_L_TAKE_PROFIT] * 100.0:.2f}%", f"{genome[P_S_TAKE_PROFIT] * 100.0:.2f}%"],
             ["Max DCA (Raw)", f"{l_dca_count} times", f"{s_dca_count} times"],
@@ -1313,10 +1278,7 @@ class GAEngine:
             short_dev_multiplier=float(genome[P_S_DEV_MULT]),
             short_vol_multiplier=float(genome[P_S_VOL_MULT]),
             short_stop_loss=float(genome[P_S_SL_RATIO]),
-            long_allocation=self.sim_config.fixed_alloc_long,
-            short_allocation=1.0 - self.sim_config.fixed_alloc_long,
-            long_leverage=self.sim_config.fixed_lev_long,
-            short_leverage=self.sim_config.fixed_lev_short,
+            leverage=self.sim_config.fixed_leverage,
             base_margin_ratio=self.sim_config.fixed_base_margin / self.sim_config.initial_capital,
             dca_margin_ratio=self.sim_config.fixed_dca_margin / self.sim_config.initial_capital,
             generation=generation,
@@ -1341,7 +1303,7 @@ class GAEngine:
         result = genome.copy()
         legalize_genome(
             result,
-            cfg.initial_capital, cfg.fixed_alloc_long, cfg.fixed_lev_long, cfg.fixed_lev_short,
+            cfg.initial_capital, cfg.fixed_leverage,
             cfg.fixed_base_margin, cfg.fixed_dca_margin,
             cfg.fee_rate, cfg.min_sl_price, cfg.dca_sl_gap, cfg.liq_buffer, cfg.max_sl_price_cap
         )
@@ -1412,9 +1374,7 @@ class GAEngine:
                 np.float32(cfg.slip_rate),
                 np.float32(cfg.fixed_base_margin),
                 np.float32(cfg.fixed_dca_margin),
-                np.float32(cfg.fixed_alloc_long),
-                np.int32(cfg.fixed_lev_long),
-                np.int32(cfg.fixed_lev_short),
+                np.int32(cfg.fixed_leverage),
                 np.float32(cfg.min_sl_price),
                 np.float32(cfg.dca_sl_gap),
                 np.float32(cfg.liq_buffer),
@@ -1435,7 +1395,7 @@ class GAEngine:
             curr_best_legalized = curr_best_genome.copy()
             legalize_genome(
                 curr_best_legalized,
-                cfg.initial_capital, cfg.fixed_alloc_long, cfg.fixed_lev_long, cfg.fixed_lev_short,
+                cfg.initial_capital, cfg.fixed_leverage,
                 cfg.fixed_base_margin, cfg.fixed_dca_margin,
                 cfg.fee_rate, cfg.min_sl_price, cfg.dca_sl_gap, cfg.liq_buffer, cfg.max_sl_price_cap
             )

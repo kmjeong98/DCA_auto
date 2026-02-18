@@ -10,7 +10,7 @@ Long/Short 동시 운영, GA 최적화 파라미터 기반 자동 진입/DCA/TP/
 DCA_auto/
 ├── main_trading.py              # 실전 매매 진입점 (PM2 구동)
 ├── main_optimize.py             # GA 최적화 실행
-├── config.json                  # 트레이딩 설정 (코인별 weight, cooldown, fee)
+├── config.json                  # 트레이딩 설정 (코인별 weight, cooldown)
 ├── ecosystem.config.js          # PM2 실행 설정 (가상환경 interpreter 지정)
 ├── requirements.txt
 ├── .env.example
@@ -85,7 +85,6 @@ GA 최적화로 결정된 `price_deviation`, `dev_multiplier`, `vol_multiplier`�
 ```json
 {
   "cooldown_hours": 6,
-  "fee_rate": 0.0005,
   "symbols": {
     "BTC_USDT": { "weight": 0.40 },
     "ETH_USDT": { "weight": 0.35 },

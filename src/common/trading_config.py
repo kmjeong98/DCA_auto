@@ -19,7 +19,6 @@ class SymbolConfig:
 class TradingConfig:
     """트레이딩 전역 설정."""
     cooldown_hours: int
-    fee_rate: float
     symbols: Dict[str, SymbolConfig]  # key: "BTC_USDT"
 
     @classmethod
@@ -43,7 +42,6 @@ class TradingConfig:
 
         return cls(
             cooldown_hours=int(data.get("cooldown_hours", 6)),
-            fee_rate=float(data.get("fee_rate", 0.0005)),
             symbols=symbols,
         )
 

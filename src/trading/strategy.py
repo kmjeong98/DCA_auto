@@ -118,10 +118,7 @@ class DCAStrategy:
         self.fixed = params["fixed_settings"]
 
         # 고정 설정
-        self.long_allocation = self.fixed["long_allocation"]
-        self.short_allocation = self.fixed["short_allocation"]
-        self.long_leverage = self.fixed["long_leverage"]
-        self.short_leverage = self.fixed["short_leverage"]
+        self.leverage = self.fixed["leverage"]
         self.base_margin = self.fixed["base_margin_ratio"]
         self.dca_margin = self.fixed["dca_margin_ratio"]
 
@@ -129,27 +126,22 @@ class DCAStrategy:
         """방향별 파라미터 반환."""
         return self.long_params if side == "long" else self.short_params
 
-    def get_leverage(self, side: str) -> int:
-        """방향별 레버리지."""
-        return self.long_leverage if side == "long" else self.short_leverage
+    def get_leverage(self, side: str = "") -> int:
+        """레버리지 반환 (Binance는 심볼당 1개이므로 방향 무관)."""
+        return self.leverage
 
-    def get_allocation(self, side: str) -> float:
-        """방향별 자본 배분율."""
-        return self.long_allocation if side == "long" else self.short_allocation
-
-    def calculate_base_margin(self, capital: float, side: str) -> float:
+    def calculate_base_margin(self, capital: float, side: str = "") -> float:
         """
         Base 주문 마진 계산.
 
         Args:
             capital: 총 자본
-            side: "long" 또는 "short"
+            side: 미사용 (호출 호환성 유지)
 
         Returns:
             Base 마진 금액
         """
-        allocation = self.get_allocation(side)
-        return capital * allocation * self.base_margin
+        return capital * self.base_margin
 
     def calculate_dca_levels(
         self,
@@ -178,8 +170,7 @@ class DCAStrategy:
         vol_multiplier = params["vol_multiplier"]
         max_dca = int(params["max_dca"])
 
-        allocation = self.get_allocation(side)
-        base_dca_margin = capital * allocation * self.dca_margin
+        base_dca_margin = capital * self.dca_margin
 
         levels: List[DCALevel] = []
 
@@ -398,33 +389,3 @@ class DCAStrategy:
 
         return None
 
-    def estimate_pnl(
-        self,
-        exit_price: float,
-        state: PositionState,
-        fee_rate: float = 0.0005,
-    ) -> float:
-        """
-        예상 PnL 계산.
-
-        Args:
-            exit_price: 청산 가격
-            state: 포지션 상태
-            fee_rate: 수수료율
-
-        Returns:
-            예상 PnL (마진 기준)
-        """
-        if not state.active or state.amount <= 0:
-            return 0.0
-
-        leverage = self.get_leverage(state.side)
-        notional = state.amount * exit_price
-
-        if state.side == "long":
-            pnl = notional - (state.cost * leverage)
-        else:
-            pnl = (state.cost * leverage) - notional
-
-        fee = notional * fee_rate
-        return state.cost + pnl - fee

@@ -122,7 +122,6 @@ def main() -> None:
     print(f"  Config:       {args.config}")
     print(f"  Balance:      ${total_balance:,.2f}")
     print(f"  Cooldown:     {config.cooldown_hours} hours")
-    print(f"  Fee Rate:     {config.fee_rate:.4f}")
     print(f"  Total Weight: {total_weight:.4f}")
     print(f"  Symbols:")
     for safe_name, sym_cfg in config.symbols.items():
