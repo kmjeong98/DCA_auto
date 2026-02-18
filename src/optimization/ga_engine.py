@@ -443,8 +443,7 @@ def run_dual_simulation(
 
                             peak_combined_equity, max_dd = _update_mdd_mark_to_market(
                                 start_p,
-                                balance, l_amt, l_cost, lev,
-                                balance, s_amt, s_cost, lev,
+                                balance, l_amt, l_cost, s_amt, s_cost, lev,
                                 peak_combined_equity, max_dd,
                                 initial_capital
                             )
@@ -457,8 +456,7 @@ def run_dual_simulation(
 
                             peak_combined_equity, max_dd = _update_mdd_mark_to_market(
                                 best_p,
-                                balance, l_amt, l_cost, lev,
-                                balance, s_amt, s_cost, lev,
+                                balance, l_amt, l_cost, s_amt, s_cost, lev,
                                 peak_combined_equity, max_dd,
                                 initial_capital
                             )
@@ -588,8 +586,7 @@ def run_dual_simulation(
 
                             peak_combined_equity, max_dd = _update_mdd_mark_to_market(
                                 start_p,
-                                balance, l_amt, l_cost, lev,
-                                balance, s_amt, s_cost, lev,
+                                balance, l_amt, l_cost, s_amt, s_cost, lev,
                                 peak_combined_equity, max_dd,
                                 initial_capital
                             )
@@ -602,8 +599,7 @@ def run_dual_simulation(
 
                             peak_combined_equity, max_dd = _update_mdd_mark_to_market(
                                 best_p,
-                                balance, l_amt, l_cost, lev,
-                                balance, s_amt, s_cost, lev,
+                                balance, l_amt, l_cost, s_amt, s_cost, lev,
                                 peak_combined_equity, max_dd,
                                 initial_capital
                             )
