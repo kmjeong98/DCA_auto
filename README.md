@@ -11,6 +11,7 @@ DCA_auto/
 ├── main_trading.py              # 실전 매매 진입점 (PM2 구동)
 ├── main_optimize.py             # GA 최적화 실행
 ├── config.json                  # 트레이딩 설정 (코인별 weight, cooldown, fee)
+├── ecosystem.config.js          # PM2 실행 설정 (가상환경 interpreter 지정)
 ├── requirements.txt
 ├── .env.example
 │
@@ -164,10 +165,14 @@ python3 main_trading.py --config my_config.json
 
 ### PM2로 상시 구동
 
+프로젝트 루트의 `ecosystem.config.js`를 사용합니다. 가상환경(`.venv`)의 Python을 interpreter로 지정하여 패키지를 올바르게 인식합니다.
+
 ```bash
-pm2 start main_trading.py --name dca-bot --interpreter python3 -- --mainnet
+pm2 start ecosystem.config.js
 pm2 save
 ```
+
+Testnet으로 실행하려면 `ecosystem.config.js`의 `args`를 `"--testnet"`으로 변경합니다.
 
 ## 기술 스택
 
