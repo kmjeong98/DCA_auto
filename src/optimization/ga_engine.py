@@ -67,19 +67,19 @@ class SimulationConfig:
     timeframe: str = "1m"
     data_years: int = 5
     start_date_str: Optional[str] = None
-    
+
     initial_capital: float = 1000.0
     fee_rate: float = 0.0005
     slip_rate: float = 0.0003
-    
+
     fixed_base_margin: float = 5.0
     fixed_dca_margin: float = 5.0
-    
+
     fixed_leverage: int = 25
-    
+
     cooldown_hours: int = 6
     sharpe_days: int = 14
-    
+
     # 안전 장치 상수 (OKX-style SL)
     abs_cap_dca: int = 15
     dca_sl_gap: float = 0.005
@@ -87,22 +87,32 @@ class SimulationConfig:
     max_sl_price_cap: float = 0.95
     min_sl_price: float = 0.005
 
+    @classmethod
+    def from_dict(cls, d: Dict) -> "SimulationConfig":
+        """딕셔너리에서 생성. 없는 키는 기본값 사용."""
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+
 
 @dataclass
 class GAConfig:
     """유전 알고리즘 설정."""
     min_pop_size: int = 2000
     max_pop_size: int = 5000
-    
+
     elite_ratio: float = 0.05
-    
+
     growth_interval: int = 5
     growth_multiplier: float = 1.10
-    
-    max_generations: int = 50000
+
+    max_generations: int = 5000
     max_patience_limit: int = 50
-    
+
     tournament_size: int = 3
+
+    @classmethod
+    def from_dict(cls, d: Dict) -> "GAConfig":
+        """딕셔너리에서 생성. 없는 키는 기본값 사용."""
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
 # --- Parameter Indices (Total: 12) ---

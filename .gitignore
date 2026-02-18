@@ -1,6 +1,7 @@
 .env
 .venv/
 config.json
+optimize_config.json
 data/
 __pycache__/
 *.pyc

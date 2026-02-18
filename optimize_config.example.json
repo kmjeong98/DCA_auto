@@ -1,0 +1,28 @@
+{
+  "tickers": [
+    "BTC/USDT",
+    "ETH/USDT",
+    "SOL/USDT"
+  ],
+  "simulation": {
+    "timeframe": "1m",
+    "data_years": 5,
+    "initial_capital": 1000.0,
+    "fee_rate": 0.0005,
+    "slip_rate": 0.0003,
+    "fixed_base_margin": 5.0,
+    "fixed_dca_margin": 5.0,
+    "fixed_leverage": 25,
+    "cooldown_hours": 6,
+    "sharpe_days": 14
+  },
+  "ga": {
+    "min_pop_size": 2000,
+    "max_pop_size": 5000,
+    "elite_ratio": 0.05,
+    "growth_interval": 5,
+    "growth_multiplier": 1.10,
+    "max_generations": 5000,
+    "max_patience_limit": 50
+  }
+}
