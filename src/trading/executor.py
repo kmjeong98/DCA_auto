@@ -124,12 +124,17 @@ class SymbolTrader:
         try:
             positions = self.api.get_positions(self.symbol)
 
+            # 거래소 포지션 확인
+            exchange_long_amt = 0.0
+            exchange_short_amt = 0.0
+
             for pos in positions:
                 side = pos.get("side", "").lower()
                 amount = float(pos.get("contracts", 0))
                 entry_price = float(pos.get("entryPrice", 0))
 
                 if side == "long" and amount > 0:
+                    exchange_long_amt = amount
                     self.long_state.active = True
                     self.long_state.amount = amount
                     if entry_price > 0:
@@ -138,12 +143,26 @@ class SymbolTrader:
                             self.long_state.base_price = entry_price
 
                 elif side == "short" and amount > 0:
+                    exchange_short_amt = amount
                     self.short_state.active = True
                     self.short_state.amount = amount
                     if entry_price > 0:
                         self.short_state.avg_price = entry_price
                         if self.short_state.base_price == 0:
                             self.short_state.base_price = entry_price
+
+            # 거래소에 포지션이 없는데 로컬 state가 active이면 리셋
+            if exchange_long_amt == 0.0 and self.long_state.active:
+                self.logger.warning("Long state was active but no exchange position — resetting")
+                sl_time = self.long_state.last_sl_time
+                self.long_state.reset()
+                self.long_state.last_sl_time = sl_time  # 쿨다운 유지
+
+            if exchange_short_amt == 0.0 and self.short_state.active:
+                self.logger.warning("Short state was active but no exchange position — resetting")
+                sl_time = self.short_state.last_sl_time
+                self.short_state.reset()
+                self.short_state.last_sl_time = sl_time  # 쿨다운 유지
 
             self.logger.info(
                 f"Synced - Long: {self.long_state.amount:.4f}, "
