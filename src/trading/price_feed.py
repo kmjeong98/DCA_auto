@@ -1,10 +1,11 @@
-"""WebSocket 기반 실시간 가격 피드."""
+"""WebSocket 기반 실시간 가격 피드 (binance-futures-connector 기반)."""
 
 import json
 import threading
 import time
-from typing import Callable, Dict, List, Optional, Set
-from websocket import WebSocketApp
+from typing import Callable, Dict, List, Optional
+
+from binance.websocket.um_futures.websocket_client import UMFuturesWebsocketClient
 
 from src.common.logger import setup_logger
 
@@ -12,8 +13,8 @@ from src.common.logger import setup_logger
 class PriceFeed:
     """Binance Futures WebSocket 가격 피드."""
 
-    MAINNET_WS = "wss://fstream.binance.com/ws"
-    TESTNET_WS = "wss://stream.binancefuture.com/ws"
+    MAINNET_WS = "wss://fstream.binance.com"
+    TESTNET_WS = "wss://fstream.binancefuture.com"
 
     def __init__(
         self,
@@ -21,14 +22,6 @@ class PriceFeed:
         on_price_update: Callable[[str, float], None],
         testnet: bool = True,
     ) -> None:
-        """
-        WebSocket 가격 피드 초기화.
-
-        Args:
-            symbols: 구독할 심볼 리스트 (예: ["BTC/USDT", "ETH/USDT"])
-            on_price_update: 가격 업데이트 콜백 (symbol, price)
-            testnet: Testnet 사용 여부
-        """
         self.symbols = symbols
         self.on_price_update = on_price_update
         self.testnet = testnet
@@ -36,31 +29,19 @@ class PriceFeed:
         self.ws_url = self.TESTNET_WS if testnet else self.MAINNET_WS
         self.logger = setup_logger("price_feed", "logs/price_feed.log")
 
-        # 가격 저장소 (thread-safe)
         self._prices: Dict[str, float] = {}
         self._lock = threading.Lock()
 
-        # WebSocket 관련
-        self._ws: Optional[WebSocketApp] = None
-        self._ws_thread: Optional[threading.Thread] = None
+        self._ws_client: Optional[UMFuturesWebsocketClient] = None
         self._running = False
-        self._reconnect_delay = 5
 
         # 심볼 매핑 (BTC/USDT -> btcusdt)
-        self._symbol_map: Dict[str, str] = {}
         self._stream_to_symbol: Dict[str, str] = {}
         for symbol in symbols:
             stream_name = symbol.replace("/", "").lower()
-            self._symbol_map[symbol] = stream_name
             self._stream_to_symbol[stream_name] = symbol
 
-    def _build_ws_url(self) -> str:
-        """구독 스트림 URL 생성."""
-        streams = [f"{s}@markPrice@1s" for s in self._symbol_map.values()]
-        return f"{self.ws_url}/{'/'.join(streams)}" if len(streams) == 1 else \
-               f"{self.ws_url.replace('/ws', '/stream')}?streams={'/'.join(streams)}"
-
-    def _on_message(self, ws: WebSocketApp, message: str) -> None:
+    def _on_message(self, _, message: str) -> None:
         """WebSocket 메시지 처리."""
         try:
             data = json.loads(message)
@@ -70,16 +51,14 @@ class PriceFeed:
                 data = data["data"]
 
             if data.get("e") == "markPriceUpdate":
-                stream_symbol = data["s"].lower()
+                raw_symbol = data["s"].lower()
                 mark_price = float(data["p"])
 
-                # btcusdt -> BTC/USDT 변환
-                symbol = self._stream_to_symbol.get(stream_symbol)
+                symbol = self._stream_to_symbol.get(raw_symbol)
                 if symbol:
                     with self._lock:
                         self._prices[symbol] = mark_price
 
-                    # 콜백 호출
                     try:
                         self.on_price_update(symbol, mark_price)
                     except Exception as e:
@@ -90,46 +69,45 @@ class PriceFeed:
         except Exception as e:
             self.logger.error(f"Message processing error: {e}")
 
-    def _on_error(self, ws: WebSocketApp, error: Exception) -> None:
+    def _on_close(self, _) -> None:
+        """WebSocket 연결 종료 처리."""
+        self.logger.warning("WebSocket closed")
+        if self._running:
+            self.logger.info("Reconnecting in 5s...")
+            time.sleep(5)
+            self._connect()
+
+    def _on_error(self, _, error) -> None:
         """WebSocket 에러 처리."""
         self.logger.error(f"WebSocket error: {error}")
 
-    def _on_close(self, ws: WebSocketApp, close_status_code: int, close_msg: str) -> None:
-        """WebSocket 연결 종료 처리."""
-        self.logger.warning(f"WebSocket closed: {close_status_code} - {close_msg}")
-
-        # 자동 재연결
-        if self._running:
-            self.logger.info(f"Reconnecting in {self._reconnect_delay}s...")
-            time.sleep(self._reconnect_delay)
-            self._connect()
-
-    def _on_open(self, ws: WebSocketApp) -> None:
+    def _on_open(self, _) -> None:
         """WebSocket 연결 성공."""
         self.logger.info(f"WebSocket connected, symbols: {self.symbols}")
 
     def _connect(self) -> None:
-        """WebSocket 연결."""
-        url = self._build_ws_url()
-        self.logger.info(f"Connecting to {url}")
-
-        self._ws = WebSocketApp(
-            url,
+        """WebSocket 연결 및 구독."""
+        self._ws_client = UMFuturesWebsocketClient(
+            stream_url=self.ws_url,
             on_message=self._on_message,
-            on_error=self._on_error,
             on_close=self._on_close,
+            on_error=self._on_error,
             on_open=self._on_open,
         )
-        self._ws.run_forever()
+
+        for symbol in self.symbols:
+            stream_name = symbol.replace("/", "").lower()
+            self._ws_client.mark_price(symbol=stream_name, speed=1)
+
+        self.logger.info(f"Subscribed to {len(self.symbols)} mark price streams")
 
     def start(self) -> None:
-        """WebSocket 스레드 시작."""
+        """WebSocket 시작."""
         if self._running:
             return
 
         self._running = True
-        self._ws_thread = threading.Thread(target=self._connect, daemon=True)
-        self._ws_thread.start()
+        self._connect()
         self.logger.info("PriceFeed started")
 
         # 연결 대기
@@ -138,20 +116,12 @@ class PriceFeed:
     def stop(self) -> None:
         """WebSocket 종료."""
         self._running = False
-        if self._ws:
-            self._ws.close()
+        if self._ws_client:
+            self._ws_client.stop()
         self.logger.info("PriceFeed stopped")
 
     def get_price(self, symbol: str) -> Optional[float]:
-        """
-        현재 가격 조회 (캐시).
-
-        Args:
-            symbol: 심볼
-
-        Returns:
-            마크 가격 또는 None
-        """
+        """현재 가격 조회 (캐시)."""
         with self._lock:
             return self._prices.get(symbol)
 
@@ -162,22 +132,15 @@ class PriceFeed:
 
     def is_connected(self) -> bool:
         """연결 상태 확인."""
-        return self._ws is not None and self._running
+        return self._ws_client is not None and self._running
 
     def add_symbol(self, symbol: str) -> None:
-        """
-        심볼 추가 (재연결 필요).
-
-        Args:
-            symbol: 추가할 심볼
-        """
+        """심볼 추가 (재연결 필요)."""
         if symbol not in self.symbols:
             stream_name = symbol.replace("/", "").lower()
             self.symbols.append(symbol)
-            self._symbol_map[symbol] = stream_name
             self._stream_to_symbol[stream_name] = symbol
 
-            # 재연결
             if self._running:
                 self.stop()
                 time.sleep(1)
@@ -187,8 +150,8 @@ class PriceFeed:
 class OrderUpdateFeed:
     """사용자 데이터 스트림 (주문/포지션 업데이트)."""
 
-    MAINNET_WS = "wss://fstream.binance.com/ws"
-    TESTNET_WS = "wss://stream.binancefuture.com/ws"
+    MAINNET_WS = "wss://fstream.binance.com"
+    TESTNET_WS = "wss://fstream.binancefuture.com"
 
     def __init__(
         self,
@@ -197,15 +160,6 @@ class OrderUpdateFeed:
         on_position_update: Callable[[Dict], None],
         testnet: bool = True,
     ) -> None:
-        """
-        사용자 데이터 스트림 초기화.
-
-        Args:
-            listen_key: Binance listenKey
-            on_order_update: 주문 업데이트 콜백
-            on_position_update: 포지션 업데이트 콜백
-            testnet: Testnet 여부
-        """
         self.listen_key = listen_key
         self.on_order_update = on_order_update
         self.on_position_update = on_position_update
@@ -214,18 +168,16 @@ class OrderUpdateFeed:
         self.ws_url = self.TESTNET_WS if testnet else self.MAINNET_WS
         self.logger = setup_logger("order_feed", "logs/order_feed.log")
 
-        self._ws: Optional[WebSocketApp] = None
-        self._ws_thread: Optional[threading.Thread] = None
+        self._ws_client: Optional[UMFuturesWebsocketClient] = None
         self._running = False
 
-    def _on_message(self, ws: WebSocketApp, message: str) -> None:
+    def _on_message(self, _, message: str) -> None:
         """메시지 처리."""
         try:
             data = json.loads(message)
             event_type = data.get("e")
 
             if event_type == "ORDER_TRADE_UPDATE":
-                # 주문 업데이트
                 order_data = data.get("o", {})
                 self.on_order_update({
                     "symbol": order_data.get("s"),
@@ -243,7 +195,6 @@ class OrderUpdateFeed:
                 })
 
             elif event_type == "ACCOUNT_UPDATE":
-                # 포지션 업데이트
                 update_data = data.get("a", {})
                 positions = update_data.get("P", [])
                 for pos in positions:
@@ -258,37 +209,35 @@ class OrderUpdateFeed:
         except Exception as e:
             self.logger.error(f"Message error: {e}")
 
-    def _on_error(self, ws: WebSocketApp, error: Exception) -> None:
-        self.logger.error(f"WebSocket error: {error}")
-
-    def _on_close(self, ws: WebSocketApp, close_status_code: int, close_msg: str) -> None:
-        self.logger.warning(f"WebSocket closed: {close_status_code}")
+    def _on_close(self, _) -> None:
+        self.logger.warning("WebSocket closed")
         if self._running:
             time.sleep(5)
             self._connect()
 
-    def _on_open(self, ws: WebSocketApp) -> None:
+    def _on_error(self, _, error) -> None:
+        self.logger.error(f"WebSocket error: {error}")
+
+    def _on_open(self, _) -> None:
         self.logger.info("User data stream connected")
 
     def _connect(self) -> None:
-        url = f"{self.ws_url}/{self.listen_key}"
-        self._ws = WebSocketApp(
-            url,
+        self._ws_client = UMFuturesWebsocketClient(
+            stream_url=self.ws_url,
             on_message=self._on_message,
-            on_error=self._on_error,
             on_close=self._on_close,
+            on_error=self._on_error,
             on_open=self._on_open,
         )
-        self._ws.run_forever()
+        self._ws_client.user_data(listen_key=self.listen_key)
 
     def start(self) -> None:
         if self._running:
             return
         self._running = True
-        self._ws_thread = threading.Thread(target=self._connect, daemon=True)
-        self._ws_thread.start()
+        self._connect()
 
     def stop(self) -> None:
         self._running = False
-        if self._ws:
-            self._ws.close()
+        if self._ws_client:
+            self._ws_client.stop()

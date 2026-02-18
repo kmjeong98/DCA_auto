@@ -1245,8 +1245,8 @@ class GAEngine:
         if params_dir:
             self.params_dir = Path(params_dir)
         else:
-            # 프로젝트 루트의 params 폴더
-            self.params_dir = self._find_project_root() / "params"
+            # 프로젝트 루트의 data/params 폴더
+            self.params_dir = self._find_project_root() / "data" / "params"
         
         self.params_dir.mkdir(parents=True, exist_ok=True)
         

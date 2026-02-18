@@ -4,6 +4,5 @@ numpy
 numba
 tabulate
 tqdm
-ccxt
+binance-futures-connector
 python-dotenv
-websocket-client
