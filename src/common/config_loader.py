@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 
 class ConfigLoader:
-    def __init__(self, params_dir: str = "params") -> None:
+    def __init__(self, params_dir: str = "data/params") -> None:
         self.params_dir = Path(params_dir)
 
     def load(self, symbol: str) -> Dict[str, Any]:
