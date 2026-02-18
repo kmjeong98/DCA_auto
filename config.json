@@ -1,6 +1,5 @@
 {
   "cooldown_hours": 6,
-  "fee_rate": 0.0005,
   "symbols": {
     "BTC_USDT": { "weight": 0.40 },
     "ETH_USDT": { "weight": 0.35 },

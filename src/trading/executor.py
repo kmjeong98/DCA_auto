@@ -1,5 +1,6 @@
 """주문 체결 및 잔고 관리."""
 
+import json
 import signal
 import threading
 import time
@@ -28,16 +29,18 @@ class SymbolTrader:
         capital: float,
         weight: float,
         margin_manager: MarginManager,
+        config_loader: ConfigLoader,
+        safe_name: str,
         cooldown_hours: int = 6,
-        fee_rate: float = 0.0005,
     ) -> None:
         self.symbol = symbol
         self.api = api_client
         self.capital = capital
         self.weight = weight
         self.margin_manager = margin_manager
+        self.config_loader = config_loader
+        self._params_safe_name = safe_name
         self.cooldown_hours = cooldown_hours
-        self.fee_rate = fee_rate
 
         # 전략 초기화
         self.strategy = DCAStrategy(params)
@@ -58,12 +61,28 @@ class SymbolTrader:
         self._current_price: float = 0.0
         self._lock = threading.Lock()
 
+        # 잔고 스냅샷 (PnL 계산용)
+        self._last_equity: float = 0.0
+
+        # active_params 디렉토리
+        self._active_params_dir = Path("data/active_params")
+
         # 초기화 완료 플래그
         self._initialized = False
 
     def initialize(self) -> None:
         """거래소 설정 및 초기 포지션 동기화."""
         self.logger.info(f"Initializing {self.symbol}...")
+
+        # 정전 복구: active_params 파일이 있으면 그것을 우선 사용
+        active_params = self._load_active_params()
+        if active_params:
+            self.strategy = DCAStrategy(active_params)
+            self.logger.info("Loaded params from active_params (recovery)")
+        else:
+            # 최초 시작: 현재 params를 active_params에 저장
+            self._save_active_params(self.strategy.params)
+            self.logger.info("Saved initial params to active_params")
 
         # Cross 마진 모드 설정
         try:
@@ -90,6 +109,12 @@ class SymbolTrader:
 
         # 거래소 포지션과 동기화
         self._sync_with_exchange()
+
+        # 잔고 스냅샷 초기화 (PnL 계산 기준점)
+        try:
+            self._last_equity = self.api.get_account_equity()
+        except Exception as e:
+            self.logger.warning(f"Initial equity snapshot failed: {e}")
 
         self._initialized = True
         self.logger.info(
@@ -156,6 +181,57 @@ class SymbolTrader:
         except Exception as e:
             self.logger.error(f"Margin update error: {e}")
 
+        # 파라미터 업데이트도 같이 시도
+        self._try_update_params()
+
+    def _try_update_params(self) -> None:
+        """양쪽 비활성 시 파라미터 변경 감지 및 교체."""
+        try:
+            new_params = self.config_loader.load(self._params_safe_name)
+            if new_params == self.strategy.params:
+                return  # 동일하면 무시
+
+            self.strategy = DCAStrategy(new_params)
+            self._save_active_params(new_params)
+
+            # 레버리지 재설정 (변경 가능)
+            long_lev = self.strategy.get_leverage("long")
+            short_lev = self.strategy.get_leverage("short")
+            max_lev = max(long_lev, short_lev)
+            try:
+                self.api.set_leverage(self.symbol, max_lev)
+            except Exception:
+                pass
+
+            self.logger.info(
+                f"Params updated for {self.symbol} "
+                f"(leverage: {max_lev}x L:{long_lev}/S:{short_lev})"
+            )
+        except Exception as e:
+            self.logger.error(f"Params update error: {e}")
+
+    def _save_active_params(self, params: Dict[str, Any]) -> None:
+        """현재 사용 중인 파라미터를 active_params에 저장."""
+        try:
+            self._active_params_dir.mkdir(parents=True, exist_ok=True)
+            file_path = self._active_params_dir / f"{self._params_safe_name}.json"
+            with file_path.open("w", encoding="utf-8") as f:
+                json.dump(params, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            self.logger.error(f"Save active params error: {e}")
+
+    def _load_active_params(self) -> Optional[Dict[str, Any]]:
+        """active_params에서 파라미터 로드 (정전 복구용)."""
+        file_path = self._active_params_dir / f"{self._params_safe_name}.json"
+        if not file_path.exists():
+            return None
+        try:
+            with file_path.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            self.logger.error(f"Load active params error: {e}")
+            return None
+
     def _enter_position(self, side: str) -> bool:
         """시장가로 Base 포지션 진입."""
         state = self.long_state if side == "long" else self.short_state
@@ -221,6 +297,12 @@ class SymbolTrader:
 
             # TP 주문 배치
             self._place_tp_order(side)
+
+            # 잔고 스냅샷 갱신 (진입 후 기준점)
+            try:
+                self._last_equity = self.api.get_account_equity()
+            except Exception:
+                pass
 
             self._save_state()
             return True
@@ -356,7 +438,13 @@ class SymbolTrader:
         """TP 체결 처리."""
         state = self.long_state if side == "long" else self.short_state
 
-        pnl = self.strategy.estimate_pnl(self._current_price, state, self.fee_rate)
+        # 잔고 기반 PnL 계산
+        try:
+            new_equity = self.api.get_account_equity()
+            pnl = new_equity - self._last_equity
+            self._last_equity = new_equity
+        except Exception:
+            pnl = 0.0
 
         self.logger.info(
             f"TP HIT {side.upper()} - Price: {self._current_price:.2f}, "
@@ -380,7 +468,13 @@ class SymbolTrader:
         """SL 체결 처리."""
         state = self.long_state if side == "long" else self.short_state
 
-        pnl = self.strategy.estimate_pnl(self._current_price, state, self.fee_rate)
+        # 잔고 기반 PnL 계산
+        try:
+            new_equity = self.api.get_account_equity()
+            pnl = new_equity - self._last_equity
+            self._last_equity = new_equity
+        except Exception:
+            pnl = 0.0
 
         self.logger.info(
             f"SL HIT {side.upper()} - Price: {self._current_price:.2f}, "
@@ -701,8 +795,9 @@ class TradingExecutor:
                         capital=capital,
                         weight=sym_cfg.weight,
                         margin_manager=self.margin_manager,
+                        config_loader=self.config_loader,
+                        safe_name=safe_name,
                         cooldown_hours=self.config.cooldown_hours,
-                        fee_rate=self.config.fee_rate,
                     )
                     trader.initialize()
                     self.traders[symbol] = trader

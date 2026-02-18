@@ -398,33 +398,3 @@ class DCAStrategy:
 
         return None
 
-    def estimate_pnl(
-        self,
-        exit_price: float,
-        state: PositionState,
-        fee_rate: float = 0.0005,
-    ) -> float:
-        """
-        예상 PnL 계산.
-
-        Args:
-            exit_price: 청산 가격
-            state: 포지션 상태
-            fee_rate: 수수료율
-
-        Returns:
-            예상 PnL (마진 기준)
-        """
-        if not state.active or state.amount <= 0:
-            return 0.0
-
-        leverage = self.get_leverage(state.side)
-        notional = state.amount * exit_price
-
-        if state.side == "long":
-            pnl = notional - (state.cost * leverage)
-        else:
-            pnl = (state.cost * leverage) - notional
-
-        fee = notional * fee_rate
-        return state.cost + pnl - fee
