@@ -4,13 +4,34 @@ Binance Futures 양방향 DCA 자동매매 봇.
 
 Long/Short 동시 운영, GA 최적화 파라미터 기반 자동 진입/DCA/TP/SL을 수행합니다.
 
+## Quick Start
+
+```bash
+# 1. 의존성 설치
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 2. 설정 파일 초기화 (.env, config, optimize_config)
+mv .env.example .env && mv config.example.json config.json && mv optimize_config.example.json optimize_config.json
+
+# 3. .env에 API 키 입력 후, config.json / optimize_config.json 편집
+
+# 4. GA 최적화 → 파라미터 생성
+python3 main_optimize.py
+
+# 5. 매매 시작
+python3 main_trading.py --testnet
+```
+
 ## 프로젝트 구조
 
 ```
 DCA_auto/
 ├── main_trading.py              # 실전 매매 진입점 (PM2 구동)
 ├── main_optimize.py             # GA 최적화 실행
-├── config.example.json           # 트레이딩 설정 템플릿 (cp → config.json)
+├── config.example.json          # 트레이딩 설정 템플릿
+├── optimize_config.example.json # 최적화 설정 템플릿
 ├── ecosystem.config.js          # PM2 실행 설정 (가상환경 interpreter 지정)
 ├── requirements.txt
 ├── .env.example
@@ -36,6 +57,7 @@ DCA_auto/
 │
 ├── data/                        # Git 미포함
 │   ├── params/                  # GA 최적화 결과 (BTC_USDT.json, ...)
+│   ├── active_params/           # 현재 사용 중인 파라미터 (정전 복구용)
 │   └── margins/                 # 코인별 마진 상태 파일
 │
 └── logs/                        # Git 미포함
@@ -113,24 +135,9 @@ Binance Futures는 심볼당 레버리지 하나만 지원하므로, Long/Short 
 - **감소 방지**: 잔고가 줄어도 기존 마진을 유지 (DCA 특성상 사이클 내에서 복구 가능)
 - **증가 반영**: 잔고 증가 시 새로운 자본 반영
 
-## 설정 방법
+## 설정 파일
 
-### 1. 의존성 설치
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### 2. 환경 변수 및 설정 파일
-
-```bash
-cp .env.example .env
-cp config.example.json config.json
-```
-
-`.env` 파일에 API 키를 설정합니다:
+### .env — API 키
 
 ```
 BINANCE_API_KEY=your_api_key_here
@@ -138,15 +145,36 @@ BINANCE_API_SECRET=your_api_secret_here
 USE_TESTNET=true
 ```
 
-`config.json`에서 거래할 코인과 자본 비율을 설정합니다. 심볼 이름은 `data/params/`의 파일명과 일치해야 합니다.
+### config.json — 트레이딩 설정
 
-### 3. GA 최적화 (파라미터 생성)
+거래할 코인과 자본 비율. 심볼 이름은 `data/params/`의 파일명과 일치해야 합니다.
 
-```bash
-python3 main_optimize.py
+### optimize_config.json — 최적화 설정
+
+```json
+{
+  "tickers": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
+  "simulation": {
+    "timeframe": "1m",
+    "data_years": 5,
+    "initial_capital": 1000.0,
+    "fixed_leverage": 25,
+    "fixed_base_margin": 5.0,
+    "fixed_dca_margin": 5.0,
+    "fee_rate": 0.0005,
+    "slip_rate": 0.0003,
+    "cooldown_hours": 6,
+    "sharpe_days": 14
+  },
+  "ga": {
+    "min_pop_size": 2000,
+    "max_pop_size": 5000,
+    "elite_ratio": 0.05,
+    "max_generations": 5000,
+    "max_patience_limit": 50
+  }
+}
 ```
-
-결과는 `data/params/`에 코인별 JSON으로 저장됩니다. 이 파일이 없으면 매매를 시작할 수 없습니다.
 
 ## 실행
 
