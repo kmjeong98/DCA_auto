@@ -146,6 +146,7 @@ def main() -> None:
     executor = TradingExecutor(
         config=config,
         testnet=testnet,
+        config_path=args.config,
     )
     executor.run()
 
