@@ -156,6 +156,7 @@ class APIClient:
             "type": "MARKET",
             "quantity": amount,
             "positionSide": position_side,
+            "newOrderRespType": "RESULT",
         }
         if reduce_only:
             kwargs["reduceOnly"] = "true"
