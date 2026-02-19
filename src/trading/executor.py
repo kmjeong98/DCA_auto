@@ -1,12 +1,13 @@
 """주문 체결 및 잔고 관리."""
 
 import json
+import os
 import signal
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from src.common.api_client import APIClient
 from src.common.config_loader import ConfigLoader
@@ -69,6 +70,9 @@ class SymbolTrader:
 
         # 초기화 완료 플래그
         self._initialized = False
+
+        # 제거 대기 플래그 (config에서 삭제된 종목)
+        self._marked_for_removal = False
 
     def initialize(self) -> None:
         """거래소 설정 및 초기 포지션 동기화."""
@@ -247,6 +251,10 @@ class SymbolTrader:
 
     def _enter_position(self, side: str) -> bool:
         """시장가로 Base 포지션 진입."""
+        # 제거 대기 종목은 신규 진입 안 함
+        if self._marked_for_removal:
+            return False
+
         state = self.long_state if side == "long" else self.short_state
 
         if state.active:
@@ -676,6 +684,7 @@ class TradingExecutor:
         self,
         config: TradingConfig,
         testnet: bool = True,
+        config_path: str = "config.json",
     ) -> None:
         self.config = config
         self.testnet = testnet
@@ -708,6 +717,11 @@ class TradingExecutor:
         self._running = False
         self._shutdown_event = threading.Event()
 
+        # config.json 핫 리로드
+        self._config_path: str = config_path
+        self._config_mtime: float = 0.0
+        self._pending_removals: Set[str] = set()  # 제거 대기 종목 (symbol 형식)
+
     @staticmethod
     def _raw_to_symbol(raw_symbol: str) -> str:
         """BTCUSDT → BTC/USDT 변환."""
@@ -736,6 +750,186 @@ class TradingExecutor:
     def _on_position_update(self, data: Dict[str, Any]) -> None:
         """포지션 업데이트 콜백 (로깅용)."""
         self.logger.debug(f"Position update: {data}")
+
+    # ---- config.json 핫 리로드 ----
+
+    def _check_config_update(self) -> None:
+        """config.json 변경 감지 및 처리 (mtime 비교)."""
+        try:
+            current_mtime = os.path.getmtime(self._config_path)
+        except OSError:
+            return  # 파일 접근 불가 시 무시
+
+        if current_mtime == self._config_mtime:
+            return  # 변경 없음
+
+        self._config_mtime = current_mtime
+        self.logger.info("config.json change detected, reloading...")
+
+        try:
+            new_config = TradingConfig.load(self._config_path)
+        except Exception as e:
+            self.logger.error(f"Config reload failed: {e}")
+            return
+
+        # 현재 vs 새 심볼 비교
+        old_symbols = set(self.config.symbols.keys())  # safe_name: "BTC_USDT"
+        new_symbols = set(new_config.symbols.keys())
+
+        added = new_symbols - old_symbols
+        removed = old_symbols - new_symbols
+        common = old_symbols & new_symbols
+
+        # cooldown_hours 변경 반영
+        if new_config.cooldown_hours != self.config.cooldown_hours:
+            self.logger.info(
+                f"Cooldown changed: {self.config.cooldown_hours}h → "
+                f"{new_config.cooldown_hours}h"
+            )
+            for trader in self.traders.values():
+                trader.cooldown_hours = new_config.cooldown_hours
+
+        # weight 변경 감지
+        for safe_name in common:
+            old_weight = self.config.symbols[safe_name].weight
+            new_weight = new_config.symbols[safe_name].weight
+            if old_weight != new_weight:
+                symbol = new_config.symbols[safe_name].symbol
+                if symbol in self.traders:
+                    self.traders[symbol].weight = new_weight
+                    self.logger.info(
+                        f"{symbol} weight changed: {old_weight:.4f} → {new_weight:.4f}"
+                    )
+
+        # 종목 추가
+        need_reconnect = False
+        for safe_name in added:
+            sym_cfg = new_config.symbols[safe_name]
+            self.logger.info(f"Adding new symbol: {sym_cfg.symbol}")
+            if self._add_trader(safe_name, sym_cfg):
+                need_reconnect = True
+
+        # 종목 제거 — 즉시 종료 아닌 제거 대기 등록
+        for safe_name in removed:
+            symbol = self.config.symbols[safe_name].symbol
+            if symbol in self.traders:
+                self._mark_trader_for_removal(symbol)
+
+        # config 객체 교체
+        self.config = new_config
+
+        # PriceFeed 재연결 (심볼 추가 시만)
+        if need_reconnect:
+            self._reconnect_price_feed()
+
+    def _add_trader(self, safe_name: str, sym_cfg: Any) -> bool:
+        """런타임에 새 트레이더 추가. 성공 시 True 반환."""
+        symbol = sym_cfg.symbol
+
+        if symbol in self.traders:
+            self.logger.warning(f"{symbol} already exists, skipping add")
+            return False
+
+        try:
+            # 파라미터 로드
+            params = self.config_loader.load(safe_name)
+
+            # 마진 초기화
+            total_balance = self.api.get_account_equity()
+            capital = self.margin_manager.load_or_init(
+                symbol, sym_cfg.weight, total_balance
+            )
+
+            trader = SymbolTrader(
+                symbol=symbol,
+                params=params,
+                api_client=self.api,
+                capital=capital,
+                weight=sym_cfg.weight,
+                margin_manager=self.margin_manager,
+                config_loader=self.config_loader,
+                safe_name=safe_name,
+                cooldown_hours=self.config.cooldown_hours,
+            )
+            trader.initialize()
+            self.traders[symbol] = trader
+
+            self.logger.info(f"Trader added: {symbol} (${capital:.2f})")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to add trader {symbol}: {e}")
+            return False
+
+    def _mark_trader_for_removal(self, symbol: str) -> None:
+        """종목을 제거 대기로 등록 (신규 진입 차단)."""
+        if symbol not in self.traders:
+            return
+
+        self._pending_removals.add(symbol)
+        self.traders[symbol]._marked_for_removal = True
+        self.logger.info(
+            f"{symbol} marked for removal (waiting for positions to close)"
+        )
+
+    def _remove_trader(self, symbol: str) -> None:
+        """트레이더 완전 제거 (양쪽 비활성 확인 후 호출)."""
+        trader = self.traders.get(symbol)
+        if not trader:
+            return
+
+        # state 저장 + 종료
+        trader.shutdown()
+
+        # 미체결 주문 전부 취소
+        try:
+            self.api.cancel_all_orders(symbol)
+        except Exception as e:
+            self.logger.error(f"Cancel orders error for {symbol}: {e}")
+
+        del self.traders[symbol]
+        self._pending_removals.discard(symbol)
+
+        self.logger.info(f"Trader removed: {symbol}")
+
+        # PriceFeed 재연결 (구독 심볼 변경)
+        self._reconnect_price_feed()
+
+    def _process_pending_removals(self) -> None:
+        """제거 대기 종목 중 양쪽 비활성인 것을 실제 제거."""
+        for symbol in list(self._pending_removals):
+            trader = self.traders.get(symbol)
+            if not trader:
+                self._pending_removals.discard(symbol)
+                continue
+
+            if not trader.long_state.active and not trader.short_state.active:
+                self.logger.info(
+                    f"{symbol} both sides inactive, removing trader"
+                )
+                self._remove_trader(symbol)
+
+    def _reconnect_price_feed(self) -> None:
+        """현재 traders 기준으로 PriceFeed 재연결."""
+        if not self.price_feed:
+            return
+
+        current_symbols = list(self.traders.keys())
+        if not current_symbols:
+            self.logger.warning("No symbols left, stopping price feed")
+            self.price_feed.stop()
+            return
+
+        self.logger.info(f"Reconnecting PriceFeed: {current_symbols}")
+        self.price_feed.stop()
+        time.sleep(1)
+
+        self.price_feed = PriceFeed(
+            symbols=current_symbols,
+            on_price_update=self._on_price_update,
+            testnet=self.testnet,
+        )
+        self.price_feed.start()
 
     def _start_listen_key_renewal(self) -> None:
         """Listen Key 30분마다 갱신."""
@@ -856,6 +1050,12 @@ class TradingExecutor:
 
             self.logger.info("Trading started")
 
+            # config.json 초기 mtime 저장
+            try:
+                self._config_mtime = os.path.getmtime(self._config_path)
+            except OSError:
+                self._config_mtime = 0.0
+
             # 메인 루프 (상태 모니터링 + 폴링 백업)
             poll_counter = 0
             while not self._shutdown_event.is_set():
@@ -865,8 +1065,14 @@ class TradingExecutor:
                     poll_counter += 1
                     self._log_status()
 
-                    # 5분마다 DCA 폴링 백업
+                    # 제거 대기 종목 처리 (매 60초)
+                    if self._pending_removals:
+                        self._process_pending_removals()
+
+                    # 5분마다: config 변경 감지 + DCA 폴링 백업
                     if poll_counter % 5 == 0:
+                        self._check_config_update()
+
                         for trader in self.traders.values():
                             trader._check_and_handle_dca_fills("long")
                             trader._check_and_handle_dca_fills("short")
