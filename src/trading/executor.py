@@ -52,7 +52,7 @@ class SymbolTrader:
 
         # 로깅
         safe_symbol = symbol.replace("/", "_")
-        self.logger = setup_logger(f"trader_{safe_symbol}", f"logs/trader_{safe_symbol}.log")
+        self.logger = setup_logger(f"trader_{safe_symbol}", f"data/logs/trader_{safe_symbol}.log")
         self.trade_logger = TradeLogger()
 
         # 상태 관리
@@ -742,12 +742,12 @@ class TradingExecutor:
         self,
         config: TradingConfig,
         testnet: bool = True,
-        config_path: str = "config.json",
+        config_path: str = "config/config.json",
     ) -> None:
         self.config = config
         self.testnet = testnet
 
-        self.logger = setup_logger("executor", "logs/executor.log")
+        self.logger = setup_logger("executor", "data/logs/executor.log")
         self.config_loader = ConfigLoader()
 
         # API 클라이언트

@@ -19,7 +19,7 @@ class MarginManager:
     def __init__(self, margin_dir: str = "data/margins") -> None:
         self.margin_dir = Path(margin_dir)
         self.margin_dir.mkdir(parents=True, exist_ok=True)
-        self.logger = setup_logger("margin_manager", "logs/margin_manager.log")
+        self.logger = setup_logger("margin_manager", "data/logs/margin_manager.log")
 
     def _get_path(self, symbol: str) -> Path:
         """심볼별 마진 파일 경로."""

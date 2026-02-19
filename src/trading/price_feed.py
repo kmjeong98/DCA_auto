@@ -27,7 +27,7 @@ class PriceFeed:
         self.testnet = testnet
 
         self.ws_url = self.TESTNET_WS if testnet else self.MAINNET_WS
-        self.logger = setup_logger("price_feed", "logs/price_feed.log")
+        self.logger = setup_logger("price_feed", "data/logs/price_feed.log")
 
         self._prices: Dict[str, float] = {}
         self._lock = threading.Lock()
@@ -166,7 +166,7 @@ class OrderUpdateFeed:
         self.testnet = testnet
 
         self.ws_url = self.TESTNET_WS if testnet else self.MAINNET_WS
-        self.logger = setup_logger("order_feed", "logs/order_feed.log")
+        self.logger = setup_logger("order_feed", "data/logs/order_feed.log")
 
         self._ws_client: Optional[UMFuturesWebsocketClient] = None
         self._running = False

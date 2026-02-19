@@ -3,9 +3,13 @@
 import json
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv("config/.env")
+
 from src.optimization.ga_engine import GAEngine, SimulationConfig, GAConfig
 
-CONFIG_PATH = "optimize_config.json"
+CONFIG_PATH = "config/optimize_config.json"
 
 
 def load_config(path: str = CONFIG_PATH) -> dict:
@@ -14,7 +18,7 @@ def load_config(path: str = CONFIG_PATH) -> dict:
     if not p.exists():
         raise FileNotFoundError(
             f"Config file not found: {path}. "
-            f"Run: cp optimize_config.example.json optimize_config.json"
+            f"Run: cp config/optimize_config.example.json config/optimize_config.json"
         )
     with p.open("r", encoding="utf-8") as f:
         return json.load(f)
@@ -28,7 +32,7 @@ def main() -> None:
     tickers = config.get("tickers", [])
 
     if not tickers:
-        raise ValueError("tickers 목록이 비어있습니다. optimize_config.json을 확인하세요.")
+        raise ValueError("tickers 목록이 비어있습니다. config/optimize_config.json을 확인하세요.")
 
     engine = GAEngine(sim_config=sim_config, ga_config=ga_config)
     engine.run(tickers=tickers)

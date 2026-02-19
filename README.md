@@ -12,10 +12,12 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. 설정 파일 초기화 (.env, config, optimize_config)
-mv .env.example .env && mv config.example.json config.json && mv optimize_config.example.json optimize_config.json
+# 2. 설정 파일 초기화
+mv config/.env.example config/.env
+mv config/config.example.json config/config.json
+mv config/optimize_config.example.json config/optimize_config.json
 
-# 3. .env에 API 키 입력 후, config.json / optimize_config.json 편집
+# 3. config/.env에 API 키 입력 후, config/config.json / config/optimize_config.json 편집
 
 # 4. GA 최적화 → 파라미터 생성
 python3 main_optimize.py
@@ -30,11 +32,13 @@ python3 main_trading.py --testnet
 DCA_auto/
 ├── main_trading.py              # 실전 매매 진입점 (PM2 구동)
 ├── main_optimize.py             # GA 최적화 실행
-├── config.example.json          # 트레이딩 설정 템플릿
-├── optimize_config.example.json # 최적화 설정 템플릿
 ├── ecosystem.config.js          # PM2 실행 설정 (가상환경 interpreter 지정)
 ├── requirements.txt
-├── .env.example
+│
+├── config/                      # 설정 파일
+│   ├── .env.example             # API 키 템플릿
+│   ├── config.example.json      # 트레이딩 설정 템플릿
+│   └── optimize_config.example.json # 최적화 설정 템플릿
 │
 ├── src/
 │   ├── common/
@@ -55,12 +59,13 @@ DCA_auto/
 │       ├── ga_engine.py         # GA 최적화 엔진
 │       └── backtester.py        # 백테스트 엔진
 │
-├── data/                        # Git 미포함
-│   ├── params/                  # GA 최적화 결과 (BTC_USDT.json, ...)
-│   ├── active_params/           # 현재 사용 중인 파라미터 (정전 복구용)
-│   └── margins/                 # 코인별 마진 상태 파일
-│
-└── logs/                        # Git 미포함
+└── data/                        # Git 미포함
+    ├── params/                  # GA 최적화 결과 (BTC_USDT.json, ...)
+    ├── active_params/           # 현재 사용 중인 파라미터 (정전 복구용)
+    ├── margins/                 # 코인별 마진 상태 파일
+    ├── state/                   # 포지션 상태 파일
+    └── logs/                    # 모든 로그 파일
+        └── trades/              # 거래 JSONL 로그
 ```
 
 ## 트레이딩 로직
@@ -100,7 +105,7 @@ GA 최적화로 결정된 `price_deviation`, `dev_multiplier`, `vol_multiplier`�
 
 ## 자본 관리
 
-### 자본 배분 (config.json)
+### 자본 배분 (config/config.json)
 
 봇은 시작 시 Binance 총 잔고(`totalWalletBalance`)를 조회하고, `weight` 비율로 코인별 자본을 배분합니다.
 
@@ -137,7 +142,7 @@ Binance Futures는 심볼당 레버리지 하나만 지원하므로, Long/Short 
 
 ## 설정 파일
 
-### .env — API 키
+### config/.env — API 키
 
 ```
 BINANCE_API_KEY=your_api_key_here
@@ -145,11 +150,11 @@ BINANCE_API_SECRET=your_api_secret_here
 USE_TESTNET=true
 ```
 
-### config.json — 트레이딩 설정
+### config/config.json — 트레이딩 설정
 
 거래할 코인과 자본 비율. 심볼 이름은 `data/params/`의 파일명과 일치해야 합니다.
 
-### optimize_config.json — 최적화 설정
+### config/optimize_config.json — 최적화 설정
 
 ```json
 {
@@ -186,7 +191,7 @@ python3 main_trading.py --testnet
 python3 main_trading.py --mainnet
 
 # 커스텀 설정 파일
-python3 main_trading.py --config my_config.json
+python3 main_trading.py --config config/my_config.json
 ```
 
 ### PM2로 상시 구동

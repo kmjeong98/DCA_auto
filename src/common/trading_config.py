@@ -22,7 +22,7 @@ class TradingConfig:
     symbols: Dict[str, SymbolConfig]  # key: "BTC_USDT"
 
     @classmethod
-    def load(cls, path: str = "config.json") -> "TradingConfig":
+    def load(cls, path: str = "config/config.json") -> "TradingConfig":
         """config.json 파일 로드."""
         config_path = Path(path)
         if not config_path.exists():
@@ -67,7 +67,7 @@ class TradingConfig:
 
     def validate(self) -> None:
         """설정 유효성 검증."""
-        logger = setup_logger("config", "logs/config.log")
+        logger = setup_logger("config", "data/logs/config.log")
 
         if not self.symbols:
             raise ValueError("No symbols configured")
