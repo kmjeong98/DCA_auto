@@ -16,6 +16,7 @@ from src.common.trading_config import TradingConfig
 from src.trading.margin_manager import MarginManager
 from src.trading.price_feed import PriceFeed, OrderUpdateFeed
 from src.trading.state_manager import StateManager, TradeLogger
+from src.trading.status_display import StatusDisplay
 from src.trading.strategy import DCAStrategy, DCALevel, PositionState
 
 
@@ -775,6 +776,9 @@ class TradingExecutor:
         self._running = False
         self._shutdown_event = threading.Event()
 
+        # 터미널 상태 디스플레이
+        self._status_display = StatusDisplay()
+
         # config.json 핫 리로드
         self._config_path: str = config_path
         self._config_mtime: float = 0.0
@@ -1143,7 +1147,8 @@ class TradingExecutor:
             self.shutdown()
 
     def _log_status(self) -> None:
-        """현재 상태 로깅."""
+        """현재 상태 로깅 + 터미널 디스플레이."""
+        # 파일 로그 (기존)
         for symbol, trader in self.traders.items():
             status = trader.get_status()
             self.logger.info(
@@ -1154,6 +1159,9 @@ class TradingExecutor:
                 f"Short: {status['short']['amount']:.4f} @ {status['short']['avg_price']:.2f} "
                 f"(DCA: {status['short']['dca_count']})"
             )
+
+        # 터미널 디스플레이 (TTY만)
+        self._status_display.update(self.traders, self.testnet)
 
     def shutdown(self) -> None:
         """안전한 종료."""
