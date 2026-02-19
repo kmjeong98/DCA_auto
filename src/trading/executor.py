@@ -463,16 +463,61 @@ class SymbolTrader:
                 pass
             state.tp_order_id = None
 
+    def _cancel_old_orders(
+        self,
+        old_dca_orders: List,
+        old_sl_order_id: Optional[str],
+    ) -> None:
+        """이전 포지션의 미체결 주문 취소 (TP는 이미 체결이므로 스킵)."""
+        for dca in old_dca_orders:
+            if dca.order_id:
+                try:
+                    self.api.cancel_order(self.symbol, dca.order_id)
+                except Exception:
+                    pass
+        if old_sl_order_id:
+            try:
+                self.api.cancel_order(self.symbol, old_sl_order_id)
+            except Exception:
+                pass
+
+    def _try_update_margin_with_equity(self, equity: float) -> None:
+        """equity를 외부에서 받아 마진 업데이트 (REST 중복 호출 방지)."""
+        if self.long_state.active or self.short_state.active:
+            return
+        if equity <= 0:
+            return
+        try:
+            self.capital = self.margin_manager.try_update(
+                self.symbol, self.weight, self.capital, equity
+            )
+        except Exception as e:
+            self.logger.error(f"Margin update error: {e}")
+        self._try_update_params()
+
     def _handle_tp(self, side: str) -> None:
-        """TP 체결 처리."""
+        """TP 체결 처리 — 재진입 우선, 정리 후처리."""
         state = self.long_state if side == "long" else self.short_state
 
-        # 잔고 기반 PnL 계산
+        # ── ① 즉시 재진입 (최우선) ──
+        # old order ID 임시 보관 후 reset → 바로 시장가 진입
+        old_amount = state.amount
+        old_dca_orders = state.dca_orders
+        old_sl_order_id = state.sl_order_id
+        state.reset()
+
+        self._enter_position(side)
+
+        # ── ② 이전 주문 정리 (시장가 전송 후) ──
+        self._cancel_old_orders(old_dca_orders, old_sl_order_id)
+
+        # ── ③ PnL 계산 (1회만 호출) ──
         try:
             new_equity = self.api.get_account_equity()
             pnl = new_equity - self._last_equity
             self._last_equity = new_equity
         except Exception:
+            new_equity = 0.0
             pnl = 0.0
 
         self.logger.info(
@@ -480,29 +525,44 @@ class SymbolTrader:
             f"PnL: {pnl:.2f}"
         )
         self.trade_logger.log_tp(
-            self.symbol, side, self._current_price, state.amount, pnl
+            self.symbol, side, self._current_price, old_amount, pnl
         )
 
-        # 주문 취소 및 상태 리셋
-        self._cancel_side_orders(side)
-        state.reset()
+        # ── ④ 마진 업데이트 (equity 재사용, 중복 호출 제거) ──
+        self._try_update_margin_with_equity(new_equity)
 
-        # 마진 업데이트 체크 (양쪽 비활성 시)
-        self._try_update_margin()
-
-        # 즉시 재진입
-        self._enter_position(side)
+        self._save_state()
 
     def _handle_sl(self, side: str) -> None:
         """SL 체결 처리."""
         state = self.long_state if side == "long" else self.short_state
 
-        # 잔고 기반 PnL 계산
+        # SL은 이미 체결 → old DCA + TP만 취소 (SL 스킵)
+        old_dca_orders = state.dca_orders
+        old_tp_order_id = state.tp_order_id
+        state.dca_orders = []
+        state.sl_order_id = None
+        state.tp_order_id = None
+
+        for dca in old_dca_orders:
+            if dca.order_id:
+                try:
+                    self.api.cancel_order(self.symbol, dca.order_id)
+                except Exception:
+                    pass
+        if old_tp_order_id:
+            try:
+                self.api.cancel_order(self.symbol, old_tp_order_id)
+            except Exception:
+                pass
+
+        # 잔고 기반 PnL 계산 (1회만)
         try:
             new_equity = self.api.get_account_equity()
             pnl = new_equity - self._last_equity
             self._last_equity = new_equity
         except Exception:
+            new_equity = 0.0
             pnl = 0.0
 
         self.logger.info(
@@ -513,14 +573,12 @@ class SymbolTrader:
             self.symbol, side, self._current_price, state.amount, pnl
         )
 
-        # 주문 취소 및 상태 리셋
-        self._cancel_side_orders(side)
-        state.last_sl_time = datetime.now(timezone.utc)
+        # 상태 리셋 (쿨다운 유지)
         state.reset()
-        state.last_sl_time = datetime.now(timezone.utc)  # reset 후 다시 설정
+        state.last_sl_time = datetime.now(timezone.utc)
 
-        # 마진 업데이트 체크 (양쪽 비활성 시)
-        self._try_update_margin()
+        # 마진 업데이트 (equity 재사용)
+        self._try_update_margin_with_equity(new_equity)
 
         self._save_state()
 
