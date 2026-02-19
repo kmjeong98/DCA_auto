@@ -198,7 +198,7 @@ class APIClient:
         stop_price: float,
         position_side: str = "LONG",
     ) -> Dict[str, Any]:
-        """스탑로스 주문 (시장가 트리거)."""
+        """스탑로스 주문 (시장가 트리거). Hedge Mode에서는 positionSide로 방향 지정."""
         binance_symbol = self._to_binance_symbol(symbol)
         result = self.client.new_order(
             symbol=binance_symbol,
@@ -207,7 +207,6 @@ class APIClient:
             quantity=amount,
             stopPrice=stop_price,
             positionSide=position_side,
-            reduceOnly="true",
             workingType="MARK_PRICE",
         )
         return self._normalize_order_response(result)
@@ -220,7 +219,7 @@ class APIClient:
         price: float,
         position_side: str = "LONG",
     ) -> Dict[str, Any]:
-        """테이크프로핏 주문 (LIMIT — 정확한 가격에 체결)."""
+        """테이크프로핏 주문 (LIMIT). Hedge Mode에서는 positionSide로 방향 지정."""
         binance_symbol = self._to_binance_symbol(symbol)
         result = self.client.new_order(
             symbol=binance_symbol,
@@ -229,7 +228,6 @@ class APIClient:
             quantity=amount,
             price=price,
             positionSide=position_side,
-            reduceOnly="true",
             timeInForce="GTC",
         )
         return self._normalize_order_response(result)
