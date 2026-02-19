@@ -284,8 +284,16 @@ class SymbolTrader:
                 self.symbol, order_side, amount, position_side,
             )
 
-            fill_price = float(order.get("average", price))
-            filled_amount = float(order.get("filled", amount))
+            fill_price = float(order.get("average", 0))
+            filled_amount = float(order.get("filled", 0))
+
+            # Fallback: 응답에 체결 정보가 없으면 mark price / 주문 수량 사용
+            if fill_price <= 0:
+                fill_price = self.api.get_mark_price(self.symbol)
+                self.logger.warning(f"No fill price in response, using mark price: {fill_price}")
+            if filled_amount <= 0:
+                filled_amount = amount
+                self.logger.warning(f"No filled amount in response, using order amount: {filled_amount}")
 
             # 상태 업데이트
             state.active = True
