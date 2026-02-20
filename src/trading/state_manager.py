@@ -21,7 +21,7 @@ class StateManager:
         """
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.logger = setup_logger("state_manager", "logs/state_manager.log")
+        self.logger = setup_logger("state_manager", "data/logs/state_manager.log")
 
     def _get_state_path(self, symbol: str) -> Path:
         """심볼별 상태 파일 경로."""
@@ -110,7 +110,7 @@ class StateManager:
 class TradeLogger:
     """거래 이력 로깅."""
 
-    def __init__(self, log_dir: str = "logs/trades") -> None:
+    def __init__(self, log_dir: str = "data/logs/trades") -> None:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
 

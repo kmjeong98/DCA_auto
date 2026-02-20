@@ -16,6 +16,7 @@ from src.common.trading_config import TradingConfig
 from src.trading.margin_manager import MarginManager
 from src.trading.price_feed import PriceFeed, OrderUpdateFeed
 from src.trading.state_manager import StateManager, TradeLogger
+from src.trading.status_display import StatusDisplay, SymbolSnapshot
 from src.trading.strategy import DCAStrategy, DCALevel, PositionState
 
 
@@ -52,7 +53,7 @@ class SymbolTrader:
 
         # 로깅
         safe_symbol = symbol.replace("/", "_")
-        self.logger = setup_logger(f"trader_{safe_symbol}", f"logs/trader_{safe_symbol}.log")
+        self.logger = setup_logger(f"trader_{safe_symbol}", f"data/logs/trader_{safe_symbol}.log")
         self.trade_logger = TradeLogger()
 
         # 상태 관리
@@ -742,12 +743,12 @@ class TradingExecutor:
         self,
         config: TradingConfig,
         testnet: bool = True,
-        config_path: str = "config.json",
+        config_path: str = "config/config.json",
     ) -> None:
         self.config = config
         self.testnet = testnet
 
-        self.logger = setup_logger("executor", "logs/executor.log")
+        self.logger = setup_logger("executor", "data/logs/executor.log")
         self.config_loader = ConfigLoader()
 
         # API 클라이언트
@@ -774,6 +775,10 @@ class TradingExecutor:
         # 실행 상태
         self._running = False
         self._shutdown_event = threading.Event()
+
+        # 터미널 상태 디스플레이
+        self._status_display = StatusDisplay()
+
 
         # config.json 핫 리로드
         self._config_path: str = config_path
@@ -1143,7 +1148,8 @@ class TradingExecutor:
             self.shutdown()
 
     def _log_status(self) -> None:
-        """현재 상태 로깅."""
+        """현재 상태 로깅 + 터미널 디스플레이."""
+        # 파일 로그 (기존)
         for symbol, trader in self.traders.items():
             status = trader.get_status()
             self.logger.info(
@@ -1154,6 +1160,12 @@ class TradingExecutor:
                 f"Short: {status['short']['amount']:.4f} @ {status['short']['avg_price']:.2f} "
                 f"(DCA: {status['short']['dca_count']})"
             )
+
+        # 터미널 디스플레이 (TTY만)
+        snapshots = [
+            SymbolSnapshot.from_trader(t) for t in self.traders.values()
+        ]
+        self._status_display.update(snapshots, self.testnet)
 
     def shutdown(self) -> None:
         """안전한 종료."""

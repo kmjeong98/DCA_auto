@@ -6,7 +6,7 @@ import sys
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv("config/.env")
 
 
 def parse_args() -> argparse.Namespace:
@@ -15,11 +15,11 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 예시:
-  # Testnet에서 config.json 기본 설정으로 거래
+  # Testnet에서 기본 설정으로 거래
   python main_trading.py --testnet
 
   # Mainnet에서 커스텀 설정 파일 사용
-  python main_trading.py --config my_config.json
+  python main_trading.py --config config/my_config.json
 
   # Mainnet 실행
   python main_trading.py --mainnet
@@ -29,8 +29,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=str,
-        default="config.json",
-        help="트레이딩 설정 파일 경로 (기본값: config.json)",
+        default="config/config.json",
+        help="트레이딩 설정 파일 경로 (기본값: config/config.json)",
     )
 
     parser.add_argument(
