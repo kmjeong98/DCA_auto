@@ -779,6 +779,7 @@ class TradingExecutor:
         # 터미널 상태 디스플레이
         self._status_display = StatusDisplay()
 
+
         # config.json 핫 리로드
         self._config_path: str = config_path
         self._config_mtime: float = 0.0
