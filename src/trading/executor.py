@@ -16,7 +16,7 @@ from src.common.trading_config import TradingConfig
 from src.trading.margin_manager import MarginManager
 from src.trading.price_feed import PriceFeed, OrderUpdateFeed
 from src.trading.state_manager import StateManager, TradeLogger
-from src.trading.status_display import StatusDisplay
+from src.trading.status_display import StatusDisplay, SymbolSnapshot
 from src.trading.strategy import DCAStrategy, DCALevel, PositionState
 
 
@@ -1161,7 +1161,10 @@ class TradingExecutor:
             )
 
         # 터미널 디스플레이 (TTY만)
-        self._status_display.update(self.traders, self.testnet)
+        snapshots = [
+            SymbolSnapshot.from_trader(t) for t in self.traders.values()
+        ]
+        self._status_display.update(snapshots, self.testnet)
 
     def shutdown(self) -> None:
         """안전한 종료."""
