@@ -86,20 +86,21 @@ class PriceFeed:
         self.logger.info(f"WebSocket connected, symbols: {self.symbols}")
 
     def _connect(self) -> None:
-        """WebSocket 연결 및 구독."""
+        """WebSocket 연결 및 구독 (Combined Stream — 단일 연결)."""
         self._ws_client = UMFuturesWebsocketClient(
             stream_url=self.ws_url,
             on_message=self._on_message,
             on_close=self._on_close,
             on_error=self._on_error,
             on_open=self._on_open,
+            is_combined=True,
         )
 
         for symbol in self.symbols:
             stream_name = symbol.replace("/", "").lower()
             self._ws_client.mark_price(symbol=stream_name, speed=1)
 
-        self.logger.info(f"Subscribed to {len(self.symbols)} mark price streams")
+        self.logger.info(f"Subscribed to {len(self.symbols)} mark price streams (combined)")
 
     def start(self) -> None:
         """WebSocket 시작."""
