@@ -1,4 +1,4 @@
-"""독립 모니터링 스크립트 — state 파일을 읽어 터미널 상태 표시.
+"""독립 모니터링 스크립트 — state 파일 + Binance API로 터미널 상태 표시.
 
 봇(main_trading.py)이 PM2로 백그라운드 실행 중일 때
 별도 터미널에서 실행하여 상태를 실시간 확인한다.
@@ -11,12 +11,18 @@
 
 import argparse
 import json
+import os
 import signal
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from dotenv import load_dotenv
+
+load_dotenv("config/.env")
+
+from src.common.api_client import APIClient
 from src.trading.status_display import StatusDisplay, SymbolSnapshot
 
 
@@ -37,12 +43,11 @@ def build_snapshots(
     """config, state, params, margin 파일에서 스냅샷 리스트 생성.
 
     Returns:
-        (snapshots, testnet_flag, error_msg)
+        (snapshots, error_msg)
     """
-    # config.json 로드
     cfg = load_json(Path(config_path))
     if cfg is None:
-        return [], False, f"Config not found: {config_path}"
+        return [], f"Config not found: {config_path}"
 
     cooldown_hours = int(cfg.get("cooldown_hours", 6))
     symbols_cfg = cfg.get("symbols", {})
@@ -113,6 +118,9 @@ def main() -> None:
     args = parse_args()
     testnet = not args.mainnet
 
+    # Binance API 클라이언트 (실제 잔고 조회용)
+    api = APIClient(testnet=testnet)
+
     display = StatusDisplay(force_tty=True)
 
     # Ctrl+C 시 깔끔한 종료
@@ -132,7 +140,13 @@ def main() -> None:
             sys.stdout.write(f"\033[H\033[J{error}\n")
             sys.stdout.flush()
         else:
-            display.update(snapshots, testnet)
+            # 실제 계좌 잔고 조회
+            try:
+                equity = api.get_account_equity()
+            except Exception:
+                equity = None
+
+            display.update(snapshots, testnet, account_equity=equity)
 
         # interval 동안 대기 (0.5초 단위로 체크하여 빠른 종료 지원)
         waited = 0.0

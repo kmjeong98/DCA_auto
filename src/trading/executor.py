@@ -1165,7 +1165,11 @@ class TradingExecutor:
         snapshots = [
             SymbolSnapshot.from_trader(t) for t in self.traders.values()
         ]
-        self._status_display.update(snapshots, self.testnet)
+        try:
+            equity = self.api.get_account_equity()
+        except Exception:
+            equity = None
+        self._status_display.update(snapshots, self.testnet, account_equity=equity)
 
     def shutdown(self) -> None:
         """안전한 종료."""

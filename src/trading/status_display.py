@@ -290,8 +290,15 @@ class StatusDisplay:
         self,
         snapshots: List[SymbolSnapshot],
         testnet: bool,
+        account_equity: Optional[float] = None,
     ) -> None:
-        """화면을 클리어하고 상태를 다시 그린다."""
+        """화면을 클리어하고 상태를 다시 그린다.
+
+        Args:
+            snapshots: 심볼별 스냅샷 리스트
+            testnet: 테스트넷 여부
+            account_equity: Binance 실제 계좌 잔고 (None이면 표시 안 함)
+        """
         if not self._is_tty:
             return
 
@@ -308,13 +315,10 @@ class StatusDisplay:
         lines.append(self._hline(_ML, _MR))
 
         # ── 심볼별 상태 ──
-        total_capital = 0.0
         active_count = 0
         total_positions = 0
 
         for snap in snapshots:
-            total_capital += snap.capital
-
             # 심볼 헤더
             price_str = f"${snap.current_price:,.2f}" if snap.current_price > 0 else "$---"
             cap_str = f"Capital: ${snap.capital:,.2f}"
@@ -363,8 +367,9 @@ class StatusDisplay:
 
         # ── 푸터 ──
         lines.append(self._hline(_ML, _MR))
+        equity_str = f"${account_equity:,.2f}" if account_equity is not None else "$---"
         footer = (
-            f"Capital: ${total_capital:,.2f}  |  "
+            f"Equity: {equity_str}  |  "
             f"Active: {active_count}/{total_positions}  |  "
             f"{now_str}"
         )
