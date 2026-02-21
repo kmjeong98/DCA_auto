@@ -117,6 +117,13 @@ class SymbolTrader:
         except Exception as e:
             self.logger.warning(f"Initial equity snapshot failed: {e}")
 
+        # 가격 피드 시작 전이므로 현재가를 REST로 가져옴 (모니터 표시용)
+        if self._current_price <= 0:
+            try:
+                self._current_price = self.api.get_mark_price(self.symbol)
+            except Exception:
+                pass
+
         # 동기화 결과를 state 파일에 즉시 반영 (모니터 표시용)
         self._save_state()
 
