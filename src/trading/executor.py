@@ -182,13 +182,28 @@ class SymbolTrader:
         except Exception as e:
             self.logger.error(f"Sync error: {e}")
 
+    def _is_opening_order(self, order: Dict[str, Any], side: str) -> bool:
+        """주문이 포지션을 늘리는(DCA) 주문인지 판별.
+
+        Hedge Mode에서:
+          LONG 포지션: BUY + LONG = 진입/DCA, SELL + LONG = 청산
+          SHORT 포지션: SELL + SHORT = 진입/DCA, BUY + SHORT = 청산
+        """
+        pos_side = order.get("positionSide", "")
+        order_side = order.get("side", "")
+
+        if side == "long":
+            return pos_side == "LONG" and order_side == "buy"
+        else:
+            return pos_side == "SHORT" and order_side == "sell"
+
     def _reconcile_orders(self) -> None:
         """거래소 미체결 주문과 로컬 state 전면 대조.
 
         1. 오프라인 중 체결된 DCA 주문 ID를 state에서 제거
-        2. state에서 추적하지 않는 고아 주문(orphaned orders) 취소
+        2. 고아 주문 분류: DCA(포지션 증가)는 state에 편입, TP/SL(청산)은 취소
         3. SL/TP를 취소하고 현재 포지션 기준으로 재배치
-           (amount/avg_price는 이미 _sync_with_exchange()가 보정함)
+        4. dca_count를 max_dca - 잔존 DCA 수로 보정
         """
         try:
             open_orders = self.api.get_open_orders(self.symbol)
@@ -245,10 +260,43 @@ class SymbolTrader:
             if state.tp_order_id:
                 tracked_ids.add(state.tp_order_id)
 
-        # ── 2단계: 고아 주문 취소 (state에서 추적하지 않는 주문) ──
+        # ── 2단계: 고아 주문 분류 — DCA는 편입, TP/SL은 취소 ──
         for order in open_orders:
             order_id = str(order["id"])
-            if order_id not in tracked_ids:
+            if order_id in tracked_ids:
+                continue
+
+            # 어느 side에 속하는지 확인
+            adopted = False
+            for side in ["long", "short"]:
+                state = self.long_state if side == "long" else self.short_state
+                if not state.active:
+                    continue
+
+                if self._is_opening_order(order, side):
+                    # DCA 주문 → state에 편입
+                    price = float(order.get("price", 0))
+                    amount = float(order.get("amount", 0))
+                    leverage = self.strategy.get_leverage(side)
+                    margin = amount * price / leverage if leverage > 0 else 0
+
+                    level = len(state.dca_orders) + 1
+                    state.dca_orders.append(DCALevel(
+                        level=level,
+                        trigger_price=price,
+                        margin=margin,
+                        order_id=order_id,
+                    ))
+                    tracked_ids.add(order_id)
+                    adopted = True
+                    self.logger.info(
+                        f"[{side}] Adopted orphaned DCA order {order_id} "
+                        f"(price={price:.2f}, qty={amount})"
+                    )
+                    break
+
+            if not adopted:
+                # 청산 주문 또는 매칭 불가 → 취소
                 self.logger.warning(
                     f"Cancelling orphaned order {order_id} "
                     f"({order.get('type')} {order.get('side')} "
@@ -259,11 +307,23 @@ class SymbolTrader:
                 except Exception as e:
                     self.logger.error(f"Cancel orphaned order error: {e}")
 
-        # ── 3단계: 활성 포지션의 SL/TP 재배치 (amount 불일치 보정) ──
+        # ── 3단계: 활성 포지션의 SL/TP 재배치 + dca_count 보정 ──
         for side in ["long", "short"]:
             state = self.long_state if side == "long" else self.short_state
             if not state.active or state.amount <= 0:
                 continue
+
+            # dca_count 보정: max_dca - 잔존 DCA 수
+            params = self.strategy.get_side_params(side)
+            max_dca = int(params.get("max_dca", 0))
+            remaining = len(state.dca_orders)
+            inferred_count = max_dca - remaining
+            if inferred_count > state.dca_count:
+                self.logger.info(
+                    f"[{side}] Inferred dca_count: {state.dca_count} → {inferred_count} "
+                    f"(max_dca={max_dca}, remaining={remaining})"
+                )
+                state.dca_count = inferred_count
 
             # SL 재배치
             if state.sl_order_id:
