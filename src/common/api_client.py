@@ -2,6 +2,7 @@
 
 import math
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 from binance.error import ClientError
@@ -197,19 +198,28 @@ class APIClient:
         amount: float,
         stop_price: float,
         position_side: str = "LONG",
+        max_retries: int = 3,
     ) -> Dict[str, Any]:
-        """스탑로스 주문 (시장가 트리거). Hedge Mode에서는 positionSide로 방향 지정."""
+        """스탑로스 주문 (시장가 트리거, 실패 시 재시도)."""
         binance_symbol = self._to_binance_symbol(symbol)
-        result = self.client.new_order(
-            symbol=binance_symbol,
-            side=side.upper(),
-            type="STOP_MARKET",
-            quantity=amount,
-            stopPrice=stop_price,
-            positionSide=position_side,
-            workingType="MARK_PRICE",
-        )
-        return self._normalize_order_response(result)
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = self.client.new_order(
+                    symbol=binance_symbol,
+                    side=side.upper(),
+                    type="STOP_MARKET",
+                    quantity=amount,
+                    stopPrice=stop_price,
+                    positionSide=position_side,
+                    workingType="MARK_PRICE",
+                )
+                return self._normalize_order_response(result)
+            except ClientError as e:
+                if attempt < max_retries:
+                    time.sleep(1)
+                else:
+                    raise
 
     def place_take_profit(
         self,
