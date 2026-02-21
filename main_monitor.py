@@ -103,20 +103,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--testnet",
         action="store_true",
-        default=True,
-        help="TESTNET 표시 (기본값: True)",
+        help="TESTNET 모드 강제",
     )
     parser.add_argument(
         "--mainnet",
         action="store_true",
-        help="MAINNET 표시",
+        help="MAINNET 모드 강제",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    testnet = not args.mainnet
+    if args.mainnet:
+        testnet = False
+    elif args.testnet:
+        testnet = True
+    else:
+        testnet = os.getenv("USE_TESTNET", "true").lower() == "true"
 
     # Binance API 클라이언트 (실제 잔고 조회용)
     api = APIClient(testnet=testnet)
