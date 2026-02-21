@@ -226,6 +226,16 @@ class StatusDisplay:
         return f"{_V} {text}{' ' * pad} {_V}"
 
     @staticmethod
+    def _fmt_price(value: float, sig: int = 5) -> str:
+        """유효숫자 sig자리 이상으로 가격 포맷 (콤마 포함)."""
+        if value == 0:
+            return "0." + "0" * (sig - 1)
+        import math
+        magnitude = math.floor(math.log10(abs(value)))
+        decimals = max(sig - 1 - magnitude, 0)
+        return f"{value:,.{decimals}f}"
+
+    @staticmethod
     def _visible_len(text: str) -> int:
         """ANSI escape 코드를 제외한 표시 길이."""
         clean = _ANSI_RE.sub("", text)
@@ -274,11 +284,11 @@ class StatusDisplay:
 
         tp_str = ""
         if tp_price > 0:
-            tp_str = f"TP {tp_price:,.1f}"
+            tp_str = f"TP {self._fmt_price(tp_price)}"
 
         line = (
             f"  {label} {arrow}  "
-            f"{color}{amount:.4f} @ {avg_price:,.2f}{_RESET}  "
+            f"{color}{amount:.4f} @ {self._fmt_price(avg_price)}{_RESET}  "
             f"DCA {dca_count}/{max_dca}"
         )
         if tp_str:
@@ -320,7 +330,7 @@ class StatusDisplay:
 
         for snap in snapshots:
             # 심볼 헤더
-            price_str = f"${snap.current_price:,.2f}" if snap.current_price > 0 else "$---"
+            price_str = f"${self._fmt_price(snap.current_price)}" if snap.current_price > 0 else "$---"
             cap_str = f"Capital: ${snap.capital:,.2f}"
             sym_line = f"{_BOLD}{snap.symbol}{_RESET}   {price_str}"
             visible_sym = self._visible_len(sym_line)
