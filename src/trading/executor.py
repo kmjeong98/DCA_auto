@@ -74,8 +74,10 @@ class SymbolTrader:
         # 제거 대기 플래그 (config에서 삭제된 종목)
         self._marked_for_removal = False
 
-        # SL 재시도 대기 목록 ("long" / "short")
-        self._pending_sl: Set[str] = set()
+        # 주문 재시도 대기 목록
+        self._pending_sl: Set[str] = set()   # "long" / "short"
+        self._pending_tp: Set[str] = set()   # "long" / "short"
+        self._pending_dca: List[tuple] = []  # [(side, DCALevel), ...]
 
     def initialize(self) -> None:
         """거래소 설정 및 초기 포지션 동기화."""
@@ -554,6 +556,7 @@ class SymbolTrader:
 
             except Exception as e:
                 self.logger.error(f"DCA order error: {e}")
+                self._pending_dca.append((side, dca))
 
     def _place_sl_order(self, side: str) -> None:
         """SL 주문 배치 (STOP_MARKET — mark price 트리거). 실패 시 재시도 예약."""
@@ -586,8 +589,15 @@ class SymbolTrader:
             self.logger.error(f"SL order error ({side}): {e}")
             self._pending_sl.add(side)
 
-    def retry_pending_sl(self) -> None:
-        """실패한 SL 주문 재시도 (외부에서 주기적으로 호출)."""
+    def has_pending_orders(self) -> bool:
+        """재시도 대기 중인 주문이 있는지 확인."""
+        return bool(self._pending_sl or self._pending_tp or self._pending_dca)
+
+    def retry_pending_orders(self) -> None:
+        """실패한 SL/TP/DCA 주문 재시도 (외부에서 주기적으로 호출)."""
+        changed = False
+
+        # SL 재시도
         for side in list(self._pending_sl):
             state = self.long_state if side == "long" else self.short_state
             if not state.active or state.amount <= 0 or state.sl_order_id:
@@ -596,13 +606,58 @@ class SymbolTrader:
             self.logger.info(f"Retrying SL {side.upper()}...")
             self._place_sl_order(side)
             if side not in self._pending_sl:
-                self._save_state()
+                changed = True
+
+        # TP 재시도
+        for side in list(self._pending_tp):
+            state = self.long_state if side == "long" else self.short_state
+            if not state.active or state.amount <= 0 or state.tp_order_id:
+                self._pending_tp.discard(side)
+                continue
+            self.logger.info(f"Retrying TP {side.upper()}...")
+            self._place_tp_order(side)
+            if side not in self._pending_tp:
+                changed = True
+
+        # DCA 재시도
+        remaining: List[tuple] = []
+        for side, dca in self._pending_dca:
+            state = self.long_state if side == "long" else self.short_state
+            if not state.active or state.base_price <= 0:
+                continue
+            position_side = "LONG" if side == "long" else "SHORT"
+            order_side = "buy" if side == "long" else "sell"
+            try:
+                leverage = self.strategy.get_leverage(side)
+                notional = dca.margin * leverage
+                amount = notional / dca.trigger_price
+                amount = self.api.round_amount(self.symbol, amount)
+                price = self.api.round_price(self.symbol, dca.trigger_price)
+
+                order = self.api.place_limit_order(
+                    self.symbol, order_side, amount, price, position_side,
+                )
+                dca.order_id = str(order.get("id"))
+                state.dca_orders.append(dca)
+                changed = True
+                self.logger.info(
+                    f"Retry DCA{dca.level} {side.upper()} placed - "
+                    f"Price: {price:.2f}, Amount: {amount:.4f}"
+                )
+            except Exception as e:
+                self.logger.error(f"Retry DCA order error: {e}")
+                remaining.append((side, dca))
+        self._pending_dca = remaining
+
+        if changed:
+            self._save_state()
 
     def _place_tp_order(self, side: str) -> None:
-        """TP 주문 배치 (LIMIT — 정확한 가격에 체결)."""
+        """TP 주문 배치 (LIMIT — 정확한 가격에 체결). 실패 시 재시도 예약."""
         state = self.long_state if side == "long" else self.short_state
 
         if not state.active or state.amount <= 0:
+            self._pending_tp.discard(side)
             return
 
         try:
@@ -617,6 +672,7 @@ class SymbolTrader:
             )
 
             state.tp_order_id = str(order.get("id"))
+            self._pending_tp.discard(side)
 
             self.logger.info(
                 f"TP {side.upper()} placed - Price: {tp_price:.2f}, "
@@ -624,7 +680,8 @@ class SymbolTrader:
             )
 
         except Exception as e:
-            self.logger.error(f"TP order error: {e}")
+            self.logger.error(f"TP order error ({side}): {e}")
+            self._pending_tp.add(side)
 
     def _cancel_side_orders(self, side: str) -> None:
         """한 방향의 모든 주문 취소."""
@@ -1205,18 +1262,18 @@ class TradingExecutor:
             self._listen_key_timer.daemon = True
             self._listen_key_timer.start()
 
-    def _start_sl_retry_loop(self) -> None:
-        """SL 재시도 백그라운드 스레드 시작 (15초 간격)."""
-        def _sl_retry_worker():
+    def _start_order_retry_loop(self) -> None:
+        """주문 재시도 백그라운드 스레드 시작 (15초 간격)."""
+        def _retry_worker():
             while self._running and not self._shutdown_event.is_set():
                 self._shutdown_event.wait(timeout=15)
                 if self._shutdown_event.is_set():
                     break
                 for trader in list(self.traders.values()):
-                    if trader._pending_sl:
-                        trader.retry_pending_sl()
+                    if trader.has_pending_orders():
+                        trader.retry_pending_orders()
 
-        t = threading.Thread(target=_sl_retry_worker, daemon=True)
+        t = threading.Thread(target=_retry_worker, daemon=True)
         t.start()
 
     def _setup_signal_handlers(self) -> None:
@@ -1320,8 +1377,8 @@ class TradingExecutor:
             except OSError:
                 self._config_mtime = 0.0
 
-            # SL 재시도 백그라운드 스레드 시작
-            self._start_sl_retry_loop()
+            # 주문 재시도 백그라운드 스레드 시작
+            self._start_order_retry_loop()
 
             # 메인 루프 (상태 모니터링 + 폴링 백업)
             poll_counter = 0
