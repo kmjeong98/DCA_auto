@@ -47,6 +47,12 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Mainnet 확인 프롬프트 건너뛰기 (PM2 등 비대화식 환경용)",
+    )
+
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="실제 주문 없이 시뮬레이션 모드 (미구현)",
@@ -133,7 +139,7 @@ def main() -> None:
         )
     print("=" * 60)
 
-    if not testnet:
+    if not testnet and not args.confirm:
         print("\nWARNING: MAINNET 모드입니다. 실제 자금이 사용됩니다!")
         confirm = input("계속하시겠습니까? (yes/no): ")
         if confirm.lower() != "yes":
