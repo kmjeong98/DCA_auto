@@ -33,6 +33,7 @@ DCA_auto/
 ├── main_trading.py              # 실전 매매 진입점 (PM2 구동)
 ├── main_optimize.py             # GA 최적화 실행
 ├── main_monitor.py              # 독립 모니터링 (터미널 상태 대시보드)
+├── main_web_monitor.py          # 웹 기반 모니터링 (브라우저 대시보드)
 ├── ecosystem.config.js          # PM2 실행 설정 (가상환경 interpreter 지정)
 ├── requirements.txt
 │
@@ -241,7 +242,23 @@ python3 main_monitor.py --mainnet
 ╚════════════════════════════════════════════════════════════════╝
 ```
 
-터미널에서 직접 `main_trading.py`를 실행할 때도 동일한 대시보드가 60초마다 자동 갱신됩니다 (TTY 감지).
+### 웹 모니터링
+
+브라우저 기반 대시보드로 더 보기 편하게 확인할 수 있습니다. 추가 의존성 없이 Python 표준 라이브러리만 사용합니다.
+
+```bash
+# 기본 (localhost:8080, 브라우저 자동 열림)
+python3 main_web_monitor.py
+
+# 포트 변경
+python3 main_web_monitor.py --port 3000
+
+# Mainnet 모드
+python3 main_web_monitor.py --mainnet
+
+# 브라우저 자동 열기 비활성화
+python3 main_web_monitor.py --no-open
+```
 
 ## 기술 스택
 
