@@ -74,6 +74,9 @@ class SymbolTrader:
         # 제거 대기 플래그 (config에서 삭제된 종목)
         self._marked_for_removal = False
 
+        # SL 재시도 대기 목록 ("long" / "short")
+        self._pending_sl: Set[str] = set()
+
     def initialize(self) -> None:
         """거래소 설정 및 초기 포지션 동기화."""
         self.logger.info(f"Initializing {self.symbol}...")
@@ -553,10 +556,11 @@ class SymbolTrader:
                 self.logger.error(f"DCA order error: {e}")
 
     def _place_sl_order(self, side: str) -> None:
-        """SL 주문 배치 (STOP_MARKET — mark price 트리거)."""
+        """SL 주문 배치 (STOP_MARKET — mark price 트리거). 실패 시 재시도 예약."""
         state = self.long_state if side == "long" else self.short_state
 
         if not state.active or state.amount <= 0:
+            self._pending_sl.discard(side)
             return
 
         try:
@@ -571,6 +575,7 @@ class SymbolTrader:
             )
 
             state.sl_order_id = str(order.get("id"))
+            self._pending_sl.discard(side)
 
             self.logger.info(
                 f"SL {side.upper()} placed - Price: {sl_price:.2f}, "
@@ -578,7 +583,20 @@ class SymbolTrader:
             )
 
         except Exception as e:
-            self.logger.error(f"SL order error: {e}")
+            self.logger.error(f"SL order error ({side}): {e}")
+            self._pending_sl.add(side)
+
+    def retry_pending_sl(self) -> None:
+        """실패한 SL 주문 재시도 (외부에서 주기적으로 호출)."""
+        for side in list(self._pending_sl):
+            state = self.long_state if side == "long" else self.short_state
+            if not state.active or state.amount <= 0 or state.sl_order_id:
+                self._pending_sl.discard(side)
+                continue
+            self.logger.info(f"Retrying SL {side.upper()}...")
+            self._place_sl_order(side)
+            if side not in self._pending_sl:
+                self._save_state()
 
     def _place_tp_order(self, side: str) -> None:
         """TP 주문 배치 (LIMIT — 정확한 가격에 체결)."""
@@ -1187,6 +1205,20 @@ class TradingExecutor:
             self._listen_key_timer.daemon = True
             self._listen_key_timer.start()
 
+    def _start_sl_retry_loop(self) -> None:
+        """SL 재시도 백그라운드 스레드 시작 (15초 간격)."""
+        def _sl_retry_worker():
+            while self._running and not self._shutdown_event.is_set():
+                self._shutdown_event.wait(timeout=15)
+                if self._shutdown_event.is_set():
+                    break
+                for trader in list(self.traders.values()):
+                    if trader._pending_sl:
+                        trader.retry_pending_sl()
+
+        t = threading.Thread(target=_sl_retry_worker, daemon=True)
+        t.start()
+
     def _setup_signal_handlers(self) -> None:
         """시그널 핸들러 설정."""
         def handle_shutdown(signum, frame):
@@ -1287,6 +1319,9 @@ class TradingExecutor:
                 self._config_mtime = os.path.getmtime(self._config_path)
             except OSError:
                 self._config_mtime = 0.0
+
+            # SL 재시도 백그라운드 스레드 시작
+            self._start_sl_retry_loop()
 
             # 메인 루프 (상태 모니터링 + 폴링 백업)
             poll_counter = 0
