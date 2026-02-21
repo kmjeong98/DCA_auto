@@ -12,6 +12,7 @@
 import argparse
 import json
 import math
+import os
 import signal
 import sys
 import threading
@@ -19,15 +20,70 @@ import time
 import webbrowser
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 
 load_dotenv("config/.env")
 
-from main_monitor import build_snapshots
 from src.common.api_client import APIClient
 from src.trading.status_display import SymbolSnapshot
+
+
+# ── 데이터 로딩 유틸 ─────────────────────────────────────────
+
+def _load_json(path: Path) -> Optional[Dict[str, Any]]:
+    """JSON 파일 로드. 실패 시 None."""
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def build_snapshots(config_path: str) -> tuple:
+    """config, state, params, margin 파일에서 스냅샷 리스트 생성.
+
+    Returns:
+        (snapshots, error_msg)
+    """
+    cfg = _load_json(Path(config_path))
+    if cfg is None:
+        return [], f"Config not found: {config_path}"
+
+    cooldown_hours = int(cfg.get("cooldown_hours", 6))
+    symbols_cfg = cfg.get("symbols", {})
+
+    snapshots: List[SymbolSnapshot] = []
+
+    for safe_name, sym_val in symbols_cfg.items():
+        symbol = safe_name.replace("_", "/")
+
+        state_path = Path("data/state") / f"{safe_name}_state.json"
+        state_data = _load_json(state_path) or {}
+
+        params_data = _load_json(Path("data/active_params") / f"{safe_name}.json")
+        if params_data is None:
+            params_data = _load_json(Path("data/params") / f"{safe_name}.json")
+        if params_data is None:
+            params_data = {}
+
+        margin_path = Path("data/margins") / f"{safe_name}_margin.json"
+        margin_data = _load_json(margin_path) or {}
+
+        snap = SymbolSnapshot.from_state_files(
+            symbol=symbol,
+            state_data=state_data,
+            params_data=params_data,
+            margin_data=margin_data,
+            cooldown_hours=cooldown_hours,
+        )
+        snapshots.append(snap)
+
+    return snapshots, None
 
 
 # ── 공유 데이터 ──────────────────────────────────────────────
@@ -132,7 +188,9 @@ def _data_loop(
 
         active_count = 0
         total_positions = 0
+        total_capital = 0.0
         for sn in snapshots:
+            total_capital += sn.capital
             if sn.long_active:
                 active_count += 1
             total_positions += 1
@@ -145,6 +203,8 @@ def _data_loop(
                 "snapshots": snap_dicts,
                 "equity": equity,
                 "equity_fmt": f"${equity:,.2f}" if equity is not None else "$---",
+                "total_capital": total_capital,
+                "total_capital_fmt": f"${total_capital:,.2f}",
                 "testnet": testnet,
                 "uptime": uptime,
                 "updated_at": now_str,
@@ -215,6 +275,7 @@ body{background:#0d1117;color:#c9d1d9;font-family:'JetBrains Mono','Fira Code','
     <div class="header-meta">
       <span>Uptime: <b id="uptime">--:--:--</b></span>
       <span>Equity: <b id="equity">$---</b></span>
+      <span>Capital: <b id="total-capital">$---</b></span>
       <span>Active: <b id="active">-/-</b></span>
     </div>
   </div>
@@ -253,6 +314,7 @@ function render(d) {
   }
   document.getElementById('uptime').textContent = d.uptime;
   document.getElementById('equity').textContent = d.equity_fmt;
+  document.getElementById('total-capital').textContent = d.total_capital_fmt;
   document.getElementById('active').textContent = d.active_count + '/' + d.total_positions;
   document.getElementById('updated').textContent = d.updated_at;
 
