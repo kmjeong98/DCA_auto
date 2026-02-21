@@ -117,6 +117,9 @@ class SymbolTrader:
         except Exception as e:
             self.logger.warning(f"Initial equity snapshot failed: {e}")
 
+        # 동기화 결과를 state 파일에 즉시 반영 (모니터 표시용)
+        self._save_state()
+
         self._initialized = True
         self.logger.info(
             f"Initialized {self.symbol} - Capital: ${self.capital:.2f}, "
@@ -180,11 +183,12 @@ class SymbolTrader:
             self.logger.error(f"Sync error: {e}")
 
     def _reconcile_orders(self) -> None:
-        """거래소 미체결 주문과 로컬 state 대조.
+        """거래소 미체결 주문과 로컬 state 전면 대조.
 
-        오프라인 중 체결된 DCA/SL/TP 주문의 ID를 state에서 제거한다.
-        amount/avg_price는 이미 _sync_with_exchange()가 거래소 값으로
-        보정했으므로, _process_dca_fill()을 호출하지 않고 리스트만 정리.
+        1. 오프라인 중 체결된 DCA 주문 ID를 state에서 제거
+        2. state에서 추적하지 않는 고아 주문(orphaned orders) 취소
+        3. SL/TP를 취소하고 현재 포지션 기준으로 재배치
+           (amount/avg_price는 이미 _sync_with_exchange()가 보정함)
         """
         try:
             open_orders = self.api.get_open_orders(self.symbol)
@@ -192,6 +196,9 @@ class SymbolTrader:
         except Exception as e:
             self.logger.error(f"Reconcile orders error: {e}")
             return
+
+        # ── 1단계: 각 side의 stale order ID 정리 ──
+        tracked_ids: set = set()
 
         for side in ["long", "short"]:
             state = self.long_state if side == "long" else self.short_state
@@ -219,15 +226,62 @@ class SymbolTrader:
                     f"(dca_count → {state.dca_count})"
                 )
 
+            # 추적 중인 ID 수집
+            for dca in state.dca_orders:
+                if dca.order_id:
+                    tracked_ids.add(dca.order_id)
+
             # SL: 거래소에 없으면 체결됨 또는 만료 → ID 클리어
             if state.sl_order_id and state.sl_order_id not in open_ids:
                 self.logger.info(f"[{side}] SL order {state.sl_order_id} no longer open")
                 state.sl_order_id = None
+            if state.sl_order_id:
+                tracked_ids.add(state.sl_order_id)
 
             # TP: 거래소에 없으면 체결됨 또는 만료 → ID 클리어
             if state.tp_order_id and state.tp_order_id not in open_ids:
                 self.logger.info(f"[{side}] TP order {state.tp_order_id} no longer open")
                 state.tp_order_id = None
+            if state.tp_order_id:
+                tracked_ids.add(state.tp_order_id)
+
+        # ── 2단계: 고아 주문 취소 (state에서 추적하지 않는 주문) ──
+        for order in open_orders:
+            order_id = str(order["id"])
+            if order_id not in tracked_ids:
+                self.logger.warning(
+                    f"Cancelling orphaned order {order_id} "
+                    f"({order.get('type')} {order.get('side')} "
+                    f"qty={order.get('amount')})"
+                )
+                try:
+                    self.api.cancel_order(self.symbol, order_id)
+                except Exception as e:
+                    self.logger.error(f"Cancel orphaned order error: {e}")
+
+        # ── 3단계: 활성 포지션의 SL/TP 재배치 (amount 불일치 보정) ──
+        for side in ["long", "short"]:
+            state = self.long_state if side == "long" else self.short_state
+            if not state.active or state.amount <= 0:
+                continue
+
+            # SL 재배치
+            if state.sl_order_id:
+                try:
+                    self.api.cancel_order(self.symbol, state.sl_order_id)
+                except Exception:
+                    pass
+                state.sl_order_id = None
+            self._place_sl_order(side)
+
+            # TP 재배치
+            if state.tp_order_id:
+                try:
+                    self.api.cancel_order(self.symbol, state.tp_order_id)
+                except Exception:
+                    pass
+                state.tp_order_id = None
+            self._place_tp_order(side)
 
     def _save_state(self) -> None:
         """현재 상태 저장."""
