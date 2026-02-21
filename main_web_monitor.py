@@ -351,15 +351,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=str, default="config/config.json")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--interval", type=int, default=5, help="데이터 갱신 간격 (초)")
-    parser.add_argument("--testnet", action="store_true", default=True)
-    parser.add_argument("--mainnet", action="store_true")
+    parser.add_argument("--testnet", action="store_true", help="TESTNET 모드 강제")
+    parser.add_argument("--mainnet", action="store_true", help="MAINNET 모드 강제")
     parser.add_argument("--no-open", action="store_true", help="브라우저 자동 열기 비활성화")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    testnet = not args.mainnet
+    if args.mainnet:
+        testnet = False
+    elif args.testnet:
+        testnet = True
+    else:
+        testnet = os.getenv("USE_TESTNET", "true").lower() == "true"
 
     api = APIClient(testnet=testnet)
     start_time = time.time()
