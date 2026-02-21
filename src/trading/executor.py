@@ -173,8 +173,61 @@ class SymbolTrader:
                 f"Short: {self.short_state.amount:.4f}"
             )
 
+            # ── 주문 ID 대조 (오프라인 중 체결된 주문 정리) ──
+            self._reconcile_orders()
+
         except Exception as e:
             self.logger.error(f"Sync error: {e}")
+
+    def _reconcile_orders(self) -> None:
+        """거래소 미체결 주문과 로컬 state 대조.
+
+        오프라인 중 체결된 DCA/SL/TP 주문의 ID를 state에서 제거한다.
+        amount/avg_price는 이미 _sync_with_exchange()가 거래소 값으로
+        보정했으므로, _process_dca_fill()을 호출하지 않고 리스트만 정리.
+        """
+        try:
+            open_orders = self.api.get_open_orders(self.symbol)
+            open_ids = {str(o["id"]) for o in open_orders}
+        except Exception as e:
+            self.logger.error(f"Reconcile orders error: {e}")
+            return
+
+        for side in ["long", "short"]:
+            state = self.long_state if side == "long" else self.short_state
+
+            if not state.active:
+                # 포지션이 없으면 주문도 전부 무효
+                if state.dca_orders or state.sl_order_id or state.tp_order_id:
+                    self.logger.info(f"[{side}] No position — clearing stale order IDs")
+                    state.dca_orders = []
+                    state.sl_order_id = None
+                    state.tp_order_id = None
+                continue
+
+            # DCA: 거래소에 없는 주문 = 체결됨 → 리스트에서 제거 (재계산 안 함)
+            before = len(state.dca_orders)
+            state.dca_orders = [
+                d for d in state.dca_orders
+                if d.order_id and d.order_id in open_ids
+            ]
+            removed = before - len(state.dca_orders)
+            if removed > 0:
+                state.dca_count += removed
+                self.logger.info(
+                    f"[{side}] Reconciled {removed} DCA fills "
+                    f"(dca_count → {state.dca_count})"
+                )
+
+            # SL: 거래소에 없으면 체결됨 또는 만료 → ID 클리어
+            if state.sl_order_id and state.sl_order_id not in open_ids:
+                self.logger.info(f"[{side}] SL order {state.sl_order_id} no longer open")
+                state.sl_order_id = None
+
+            # TP: 거래소에 없으면 체결됨 또는 만료 → ID 클리어
+            if state.tp_order_id and state.tp_order_id not in open_ids:
+                self.logger.info(f"[{side}] TP order {state.tp_order_id} no longer open")
+                state.tp_order_id = None
 
     def _save_state(self) -> None:
         """현재 상태 저장."""
