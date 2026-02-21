@@ -2,7 +2,6 @@
 
 import math
 import os
-import time
 from typing import Any, Dict, List, Optional
 
 from binance.error import ClientError
@@ -198,28 +197,51 @@ class APIClient:
         amount: float,
         stop_price: float,
         position_side: str = "LONG",
-        max_retries: int = 3,
     ) -> Dict[str, Any]:
-        """스탑로스 주문 (시장가 트리거, 실패 시 재시도)."""
+        """스탑로스 주문 (STOP_MARKET 시도 → 실패 시 STOP fallback).
+
+        Binance Mainnet에서 STOP_MARKET이 -4120 에러를 반환하는 경우
+        STOP (stop-limit)으로 fallback한다. 체결 보장을 위해
+        limit price에 2% 슬리피지를 적용.
+        """
         binance_symbol = self._to_binance_symbol(symbol)
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                result = self.client.new_order(
-                    symbol=binance_symbol,
-                    side=side.upper(),
-                    type="STOP_MARKET",
-                    quantity=amount,
-                    stopPrice=stop_price,
-                    positionSide=position_side,
-                    workingType="MARK_PRICE",
-                )
-                return self._normalize_order_response(result)
-            except ClientError as e:
-                if attempt < max_retries:
-                    time.sleep(1)
-                else:
-                    raise
+        # 1차: STOP_MARKET 시도
+        try:
+            result = self.client.new_order(
+                symbol=binance_symbol,
+                side=side.upper(),
+                type="STOP_MARKET",
+                quantity=amount,
+                stopPrice=stop_price,
+                positionSide=position_side,
+                workingType="MARK_PRICE",
+            )
+            return self._normalize_order_response(result)
+        except ClientError as e:
+            if e.error_code != -4120:
+                raise
+
+        # 2차: STOP (stop-limit) fallback
+        # 슬리피지 적용: SELL은 2% 아래, BUY는 2% 위
+        if side.upper() == "SELL":
+            limit_price = stop_price * 0.98
+        else:
+            limit_price = stop_price * 1.02
+        limit_price = self.round_price(symbol, limit_price)
+
+        result = self.client.new_order(
+            symbol=binance_symbol,
+            side=side.upper(),
+            type="STOP",
+            quantity=amount,
+            stopPrice=stop_price,
+            price=limit_price,
+            positionSide=position_side,
+            workingType="MARK_PRICE",
+            timeInForce="GTC",
+        )
+        return self._normalize_order_response(result)
 
     def place_take_profit(
         self,
