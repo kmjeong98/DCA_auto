@@ -150,6 +150,7 @@ class APIClient:
     ) -> Dict[str, Any]:
         """시장가 주문."""
         binance_symbol = self._to_binance_symbol(symbol)
+        amount = self.round_amount(symbol, amount)
         kwargs: Dict[str, Any] = {
             "symbol": binance_symbol,
             "side": side.upper(),
@@ -175,6 +176,8 @@ class APIClient:
     ) -> Dict[str, Any]:
         """지정가 주문."""
         binance_symbol = self._to_binance_symbol(symbol)
+        amount = self.round_amount(symbol, amount)
+        price = self.round_price(symbol, price)
         kwargs: Dict[str, Any] = {
             "symbol": binance_symbol,
             "side": side.upper(),
@@ -200,6 +203,8 @@ class APIClient:
     ) -> Dict[str, Any]:
         """스탑로스 주문 (STOP_MARKET — mark price 트리거)."""
         binance_symbol = self._to_binance_symbol(symbol)
+        amount = self.round_amount(symbol, amount)
+        stop_price = self.round_price(symbol, stop_price)
 
         result = self.client.new_order(
             symbol=binance_symbol,
@@ -222,6 +227,8 @@ class APIClient:
     ) -> Dict[str, Any]:
         """테이크프로핏 주문 (LIMIT). Hedge Mode에서는 positionSide로 방향 지정."""
         binance_symbol = self._to_binance_symbol(symbol)
+        amount = self.round_amount(symbol, amount)
+        price = self.round_price(symbol, price)
         result = self.client.new_order(
             symbol=binance_symbol,
             side=side.upper(),
