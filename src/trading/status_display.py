@@ -76,6 +76,7 @@ class SymbolSnapshot:
         self.short_last_sl_time = short_last_sl_time
 
         self.cooldown_hours = cooldown_hours
+        self.pending_retries: List[str] = []
 
     @classmethod
     def from_trader(cls, trader: Any) -> "SymbolSnapshot":
@@ -170,7 +171,7 @@ class SymbolSnapshot:
             except Exception:
                 pass
 
-        return cls(
+        snap = cls(
             symbol=symbol,
             capital=float(margin_data.get("capital", extra.get("capital", 0))),
             current_price=float(extra.get("current_price", 0)),
@@ -190,6 +191,8 @@ class SymbolSnapshot:
             short_last_sl_time=short_sl_time,
             cooldown_hours=cooldown_hours,
         )
+        snap.pending_retries = extra.get("pending_retries", [])
+        return snap
 
 
 class StatusDisplay:

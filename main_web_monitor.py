@@ -150,6 +150,7 @@ def _snapshot_to_dict(snap: SymbolSnapshot) -> Dict[str, Any]:
             "tp_price_fmt": _fmt_price(snap.short_tp_price) if snap.short_tp_price > 0 else "",
             "cooldown": _sl_remaining(snap.short_last_sl_time, snap.cooldown_hours),
         },
+        "pending_retries": snap.pending_retries,
     }
 
 
@@ -263,6 +264,11 @@ body{background:#0d1117;color:#c9d1d9;font-family:'JetBrains Mono','Fira Code','
 .dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:6px}
 .dot-green{background:#3fb950}
 .dot-red{background:#f85149}
+
+.pending-row{padding:8px 16px;background:#1a1500;border-top:1px solid #3d2e00;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pending-icon{color:#d29922;font-size:14px;animation:spin 2s linear infinite}
+@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+.pending-tag{font-size:12px;color:#d29922;background:#2d2200;border:1px solid #6e5a00;border-radius:4px;padding:1px 6px}
 </style>
 </head>
 <body>
@@ -346,6 +352,7 @@ function render(d) {
         <span class="side-label">SHORT ▼</span>
         <span class="side-detail">${renderSide(snap.short, 'SHORT', '▼')}</span>
       </div>
+      ${snap.pending_retries && snap.pending_retries.length > 0 ? `<div class="pending-row"><span class="pending-icon">⟳</span>${snap.pending_retries.map(r => `<span class="pending-tag">${r}</span>`).join('')}</div>` : ''}
     </div>`;
   }
   container.innerHTML = html;
