@@ -358,11 +358,24 @@ class SymbolTrader:
     def _save_state(self) -> None:
         """현재 상태 저장."""
         try:
+            # pending 재시도 정보
+            pending = []
+            for side in self._pending_sl:
+                pending.append(f"SL {side.upper()}")
+            for side in self._pending_tp:
+                pending.append(f"TP {side.upper()}")
+            for side, dca in self._pending_dca:
+                pending.append(f"DCA{dca.level} {side.upper()}")
+
             self.state_manager.save_state(
                 self.symbol,
                 self.long_state,
                 self.short_state,
-                {"capital": self.capital, "current_price": self._current_price},
+                {
+                    "capital": self.capital,
+                    "current_price": self._current_price,
+                    "pending_retries": pending,
+                },
             )
         except Exception as e:
             self.logger.error(f"Save state error: {e}")
