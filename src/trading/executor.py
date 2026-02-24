@@ -396,26 +396,43 @@ class SymbolTrader:
         # 파라미터 업데이트도 같이 시도
         self._try_update_params()
 
+    @staticmethod
+    def _trading_params(params: Dict[str, Any]) -> Dict[str, Any]:
+        """트레이딩에 영향을 주는 파라미터만 추출 (meta/performance 제외)."""
+        return {
+            "parameters": params.get("parameters"),
+            "fixed_settings": params.get("fixed_settings"),
+        }
+
     def _try_update_params(self) -> None:
         """양쪽 비활성 시 파라미터 변경 감지 및 교체."""
         try:
             new_params = self.config_loader.load(self._params_safe_name)
             if new_params == self.strategy.params:
-                return  # 동일하면 무시
+                return  # 완전히 동일하면 무시
 
+            trading_changed = (
+                self._trading_params(new_params)
+                != self._trading_params(self.strategy.params)
+            )
+
+            # meta/performance만 변경되어도 항상 갱신
             self.strategy = DCAStrategy(new_params)
             self._save_active_params(new_params)
 
-            # 레버리지 재설정 (변경 가능)
-            lev = self.strategy.leverage
-            try:
-                self.api.set_leverage(self.symbol, lev)
-            except Exception:
-                pass
-
-            self.logger.info(
-                f"Params updated for {self.symbol} (leverage: {lev}x)"
-            )
+            if trading_changed:
+                lev = self.strategy.leverage
+                try:
+                    self.api.set_leverage(self.symbol, lev)
+                except Exception:
+                    pass
+                self.logger.info(
+                    f"Params updated for {self.symbol} (leverage: {lev}x)"
+                )
+            else:
+                self.logger.info(
+                    f"Params meta/performance refreshed for {self.symbol}"
+                )
         except Exception as e:
             self.logger.error(f"Params update error: {e}")
 
@@ -447,22 +464,33 @@ class SymbolTrader:
         try:
             new_params = self.config_loader.load(self._params_safe_name)
             if new_params == self.strategy.params:
-                return  # 동일하면 무시
+                return  # 완전히 동일하면 무시
         except Exception as e:
             self.logger.error(f"Hot params load error: {e}")
             return
 
-        # 파라미터 교체
+        trading_changed = (
+            self._trading_params(new_params)
+            != self._trading_params(self.strategy.params)
+        )
+
+        # meta/performance만 변경 시에도 항상 갱신
         self.strategy = DCAStrategy(new_params)
         self._save_active_params(new_params)
 
+        if not trading_changed:
+            self.logger.info(
+                f"Params meta/performance refreshed for {self.symbol}"
+            )
+            return
+
+        # trading params가 변경된 경우에만 주문 재배치
         lev = self.strategy.leverage
         try:
             self.api.set_leverage(self.symbol, lev)
         except Exception:
             pass
 
-        # 활성인 각 side의 주문 취소 후 재배치
         for side in active_sides:
             state = self.long_state if side == "long" else self.short_state
 

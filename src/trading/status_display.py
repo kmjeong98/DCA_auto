@@ -78,6 +78,12 @@ class SymbolSnapshot:
         self.cooldown_hours = cooldown_hours
         self.pending_retries: List[str] = []
 
+        # 파라미터 메타/성능 정보
+        self.params_date: str = ""
+        self.mpr: float = 0.0
+        self.mdd: float = 0.0
+        self.sharpe: float = 0.0
+
     @classmethod
     def from_trader(cls, trader: Any) -> "SymbolSnapshot":
         """SymbolTrader 객체에서 생성."""
@@ -192,6 +198,20 @@ class SymbolSnapshot:
             cooldown_hours=cooldown_hours,
         )
         snap.pending_retries = extra.get("pending_retries", [])
+
+        # 파라미터 메타/성능 정보
+        meta = params_data.get("meta", {})
+        perf = params_data.get("performance", {})
+        created_at = meta.get("created_at", "")
+        if created_at:
+            try:
+                snap.params_date = created_at[:10]  # "2025-02-25T..." → "2025-02-25"
+            except Exception:
+                pass
+        snap.mpr = float(perf.get("mpr", 0))
+        snap.mdd = float(perf.get("mdd", 0))
+        snap.sharpe = float(perf.get("sharpe", 0))
+
         return snap
 
 
