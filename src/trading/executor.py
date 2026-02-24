@@ -419,6 +419,89 @@ class SymbolTrader:
         except Exception as e:
             self.logger.error(f"Params update error: {e}")
 
+    def _try_hot_update_params(self) -> None:
+        """DCA 0회 상태에서 파라미터 핫 업데이트.
+
+        양쪽 모두 비활성이면 기존 _try_update_params()가 처리하므로 스킵.
+        활성인 쪽 중 dca_count > 0이면 안전하지 않으므로 스킵.
+        활성인 쪽의 dca_count가 모두 0이면 DCA/TP/SL을 취소 후 재배치.
+        """
+        # 활성인 side 수집
+        active_sides = []
+        if self.long_state.active:
+            active_sides.append("long")
+        if self.short_state.active:
+            active_sides.append("short")
+
+        # 양쪽 모두 비활성 → 기존 로직이 처리
+        if not active_sides:
+            return
+
+        # 활성인 쪽 중 dca_count > 0 이면 업데이트 불가
+        for side in active_sides:
+            state = self.long_state if side == "long" else self.short_state
+            if state.dca_count > 0:
+                return
+
+        # 새 파라미터 로드 및 비교
+        try:
+            new_params = self.config_loader.load(self._params_safe_name)
+            if new_params == self.strategy.params:
+                return  # 동일하면 무시
+        except Exception as e:
+            self.logger.error(f"Hot params load error: {e}")
+            return
+
+        # 파라미터 교체
+        self.strategy = DCAStrategy(new_params)
+        self._save_active_params(new_params)
+
+        lev = self.strategy.leverage
+        try:
+            self.api.set_leverage(self.symbol, lev)
+        except Exception:
+            pass
+
+        # 활성인 각 side의 주문 취소 후 재배치
+        for side in active_sides:
+            state = self.long_state if side == "long" else self.short_state
+
+            # DCA 주문 취소
+            for dca in state.dca_orders:
+                if dca.order_id:
+                    try:
+                        self.api.cancel_order(self.symbol, dca.order_id)
+                    except Exception:
+                        pass
+            state.dca_orders = []
+
+            # TP 취소
+            if state.tp_order_id:
+                try:
+                    self.api.cancel_order(self.symbol, state.tp_order_id)
+                except Exception:
+                    pass
+                state.tp_order_id = None
+
+            # SL 취소
+            if state.sl_order_id:
+                try:
+                    self.api.cancel_order(self.symbol, state.sl_order_id)
+                except Exception:
+                    pass
+                state.sl_order_id = None
+
+            # 새 파라미터로 재배치
+            self._place_sl_order(side)
+            self._place_tp_order(side)
+            self._place_dca_orders(side)
+
+        self._save_state()
+        self.logger.info(
+            f"Hot params updated for {self.symbol} (leverage: {lev}x, "
+            f"sides: {', '.join(s.upper() for s in active_sides)})"
+        )
+
     def _save_active_params(self, params: Dict[str, Any]) -> None:
         """현재 사용 중인 파라미터를 active_params에 저장."""
         try:
@@ -1406,13 +1489,14 @@ class TradingExecutor:
                     if self._pending_removals:
                         self._process_pending_removals()
 
-                    # 5분마다: config 변경 감지 + DCA 폴링 백업
+                    # 5분마다: config 변경 감지 + DCA 폴링 백업 + 핫 파라미터 업데이트
                     if poll_counter % 5 == 0:
                         self._check_config_update()
 
                         for trader in self.traders.values():
                             trader._check_and_handle_dca_fills("long")
                             trader._check_and_handle_dca_fills("short")
+                            trader._try_hot_update_params()
 
         except Exception as e:
             self.logger.error(f"Executor error: {e}")
