@@ -311,9 +311,9 @@ class APIClient:
         return self._round_step(amount, step_size)
 
     def get_account_equity(self) -> float:
-        """totalWalletBalance 조회 (cross 마진 기준 총 자본)."""
+        """totalMarginBalance 조회 (미체결 손익 포함 실제 Equity)."""
         account = self.client.account()
-        return float(account["totalWalletBalance"])
+        return float(account["totalMarginBalance"])
 
     def new_listen_key(self) -> str:
         """User Data Stream용 Listen Key 생성."""
