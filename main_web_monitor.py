@@ -151,6 +151,11 @@ def _snapshot_to_dict(snap: SymbolSnapshot) -> Dict[str, Any]:
             "cooldown": _sl_remaining(snap.short_last_sl_time, snap.cooldown_hours),
         },
         "pending_retries": snap.pending_retries,
+        "params_date": snap.params_date,
+        "mpr": snap.mpr,
+        "mdd": snap.mdd,
+        "sharpe": snap.sharpe,
+        "est_monthly": snap.capital * snap.mpr / 100.0 if snap.mpr > 0 else 0.0,
     }
 
 
@@ -248,6 +253,8 @@ body{background:#0d1117;color:#c9d1d9;font-family:'JetBrains Mono','Fira Code','
 .card-price .val{color:#e6edf3}
 .card-capital{font-size:13px;color:#8b949e}
 
+.card-body{display:flex}
+.card-sides{flex:1;min-width:0}
 .side-row{display:flex;align-items:center;padding:10px 16px;border-bottom:1px solid #21262d;gap:12px}
 .side-row:last-child{border-bottom:none}
 .side-label{font-weight:700;font-size:13px;width:70px;flex-shrink:0}
@@ -258,6 +265,11 @@ body{background:#0d1117;color:#c9d1d9;font-family:'JetBrains Mono','Fira Code','
 .side-detail .tag{font-size:12px;color:#8b949e;margin-left:8px}
 .side-waiting{color:#8b949e;font-style:italic}
 .cooldown{color:#d29922}
+
+.params-panel{width:110px;flex-shrink:0;border-left:1px solid #21262d;padding:8px 12px;display:flex;flex-direction:column;justify-content:center;gap:4px;font-size:12px;color:#8b949e}
+.params-panel .p-label{color:#6e7681}
+.params-panel .p-val{color:#c9d1d9;font-weight:600}
+.params-panel .p-est{color:#3fb950;font-weight:700}
 
 .error-box{background:#2d1f1f;border:1px solid #da3633;border-radius:8px;padding:16px;color:#f85149;margin-bottom:16px}
 
@@ -344,13 +356,24 @@ function render(d) {
         </div>
         <span class="card-capital">Capital: $${snap.capital.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</span>
       </div>
-      <div class="side-row side-long">
-        <span class="side-label">LONG ▲</span>
-        <span class="side-detail">${renderSide(snap.long, 'LONG', '▲')}</span>
-      </div>
-      <div class="side-row side-short">
-        <span class="side-label">SHORT ▼</span>
-        <span class="side-detail">${renderSide(snap.short, 'SHORT', '▼')}</span>
+      <div class="card-body">
+        <div class="card-sides">
+          <div class="side-row side-long">
+            <span class="side-label">LONG ▲</span>
+            <span class="side-detail">${renderSide(snap.long, 'LONG', '▲')}</span>
+          </div>
+          <div class="side-row side-short">
+            <span class="side-label">SHORT ▼</span>
+            <span class="side-detail">${renderSide(snap.short, 'SHORT', '▼')}</span>
+          </div>
+        </div>
+        <div class="params-panel">
+          <div><span class="p-label">Date</span> <span class="p-val">${snap.params_date ? snap.params_date.slice(5) : '--'}</span></div>
+          <div><span class="p-label">MPR</span> <span class="p-val">${snap.mpr ? snap.mpr.toFixed(1) + '%' : '--'}</span></div>
+          <div><span class="p-label">MDD</span> <span class="p-val">${snap.mdd ? snap.mdd.toFixed(1) + '%' : '--'}</span></div>
+          <div><span class="p-label">SR</span> <span class="p-val">${snap.sharpe ? snap.sharpe.toFixed(2) : '--'}</span></div>
+          <div><span class="p-label">Est</span> <span class="p-est">${snap.est_monthly > 0 ? '$' + snap.est_monthly.toFixed(0) + '/mo' : '--'}</span></div>
+        </div>
       </div>
       ${snap.pending_retries && snap.pending_retries.length > 0 ? `<div class="pending-row"><span class="pending-icon">⟳</span>${snap.pending_retries.map(r => `<span class="pending-tag">${r}</span>`).join('')}</div>` : ''}
     </div>`;
