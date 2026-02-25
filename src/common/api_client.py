@@ -201,21 +201,26 @@ class APIClient:
         stop_price: float,
         position_side: str = "LONG",
     ) -> Dict[str, Any]:
-        """스탑로스 주문 (STOP_MARKET — mark price 트리거)."""
+        """스탑로스 주문 (Algo Order STOP_MARKET — mark price 트리거)."""
         binance_symbol = self._to_binance_symbol(symbol)
         amount = self.round_amount(symbol, amount)
         stop_price = self.round_price(symbol, stop_price)
 
-        result = self.client.new_order(
-            symbol=binance_symbol,
-            side=side.upper(),
-            type="STOP_MARKET",
-            quantity=amount,
-            stopPrice=stop_price,
-            positionSide=position_side,
-            workingType="MARK_PRICE",
+        result = self.client.sign_request(
+            "POST",
+            "/fapi/v1/algoOrder",
+            {
+                "algoType": "CONDITIONAL",
+                "symbol": binance_symbol,
+                "side": side.upper(),
+                "positionSide": position_side,
+                "type": "STOP_MARKET",
+                "quantity": amount,
+                "triggerPrice": stop_price,
+                "workingType": "MARK_PRICE",
+            },
         )
-        return self._normalize_order_response(result)
+        return self._normalize_algo_order_response(result)
 
     def place_take_profit(
         self,
@@ -245,14 +250,41 @@ class APIClient:
         binance_symbol = self._to_binance_symbol(symbol)
         return self.client.cancel_order(symbol=binance_symbol, orderId=int(order_id))
 
+    def cancel_algo_order(self, symbol: str, algo_id: str) -> Dict[str, Any]:
+        """Algo 주문 취소."""
+        return self.client.sign_request(
+            "DELETE",
+            "/fapi/v1/algoOrder",
+            {"algoId": int(algo_id)},
+        )
+
+    def get_open_algo_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """미체결 Algo 주문 조회."""
+        params: Dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = self._to_binance_symbol(symbol)
+        result = self.client.sign_request("GET", "/fapi/v1/openAlgoOrders", params)
+        orders = result.get("orders", []) if isinstance(result, dict) else result
+        return [self._normalize_algo_order_response(o) for o in orders]
+
     def cancel_all_orders(self, symbol: str) -> List[Dict[str, Any]]:
-        """심볼의 모든 미체결 주문 취소."""
+        """심볼의 모든 미체결 주문 취소 (일반 + Algo)."""
         binance_symbol = self._to_binance_symbol(symbol)
         try:
             self.client.cancel_open_orders(symbol=binance_symbol)
-            return []
         except ClientError:
-            return []
+            pass
+        # Algo 주문도 취소
+        try:
+            algo_orders = self.get_open_algo_orders(symbol)
+            for ao in algo_orders:
+                try:
+                    self.cancel_algo_order(symbol, str(ao["id"]))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return []
 
     def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
         """미체결 주문 조회."""
@@ -356,6 +388,24 @@ class APIClient:
             "average": float(raw.get("avgPrice", 0)),
             "amount": float(raw.get("origQty", 0)),
             "filled": float(raw.get("executedQty", 0)),
+            "positionSide": raw.get("positionSide", ""),
+            "reduceOnly": raw.get("reduceOnly", False),
+            "raw": raw,
+        }
+
+    @staticmethod
+    def _normalize_algo_order_response(raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Algo Order 응답을 기존 코드와 호환되는 형식으로 정규화."""
+        return {
+            "id": str(raw.get("algoId", "")),
+            "symbol": raw.get("symbol", ""),
+            "side": raw.get("side", "").lower(),
+            "type": raw.get("orderType", raw.get("type", "")),
+            "status": raw.get("algoStatus", ""),
+            "price": float(raw.get("triggerPrice", 0)),
+            "average": 0.0,
+            "amount": float(raw.get("quantity", 0)),
+            "filled": 0.0,
             "positionSide": raw.get("positionSide", ""),
             "reduceOnly": raw.get("reduceOnly", False),
             "raw": raw,
