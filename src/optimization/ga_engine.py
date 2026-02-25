@@ -1483,18 +1483,21 @@ class GAEngine:
                 if genomes_are_equal(curr_best_legalized, best_genome_host):
                     # 파라미터가 같으면 patience 증가
                     patience += 1
-                else:
-                    # 파라미터가 다르면 새로운 best로 업데이트하고 patience 리셋
+                elif curr_best_fit > best_stats['fitness']:
+                    # 파라미터가 다르고 fitness가 더 높으면 best 교체
                     best_stats['fitness'] = curr_best_fit
                     best_stats['mpr'] = results[best_idx, 2]
                     best_stats['mdd'] = results[best_idx, 3]
                     best_stats['sharpe'] = results[best_idx, 4]
                     best_genome_host = curr_best_legalized.copy()
                     patience = 0
-                    
+
                     if curr_pop_size > ga.min_pop_size:
                         pop_curr[0] = pop_curr[best_idx]
                         curr_pop_size = ga.min_pop_size
+                else:
+                    # 파라미터가 다르지만 fitness가 낮으면 무시
+                    patience += 1
             
             # 체크포인트
             if patience == ga.max_patience_limit // 2:
