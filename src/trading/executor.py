@@ -224,6 +224,14 @@ class SymbolTrader:
             self.logger.error(f"Reconcile orders error: {e}")
             return
 
+        # Algo 주문 (SL) 조회
+        algo_open_ids: set = set()
+        try:
+            algo_orders = self.api.get_open_algo_orders(self.symbol)
+            algo_open_ids = {str(o["id"]) for o in algo_orders}
+        except Exception as e:
+            self.logger.warning(f"Reconcile algo orders error: {e}")
+
         # ── 1단계: 각 side의 stale order ID 정리 ──
         tracked_ids: set = set()
 
@@ -258,12 +266,10 @@ class SymbolTrader:
                 if dca.order_id:
                     tracked_ids.add(dca.order_id)
 
-            # SL: 거래소에 없으면 체결됨 또는 만료 → ID 클리어
-            if state.sl_order_id and state.sl_order_id not in open_ids:
-                self.logger.info(f"[{side}] SL order {state.sl_order_id} no longer open")
+            # SL: Algo 주문으로 관리 — algo_open_ids에서 확인
+            if state.sl_order_id and state.sl_order_id not in algo_open_ids:
+                self.logger.info(f"[{side}] SL algo order {state.sl_order_id} no longer open")
                 state.sl_order_id = None
-            if state.sl_order_id:
-                tracked_ids.add(state.sl_order_id)
 
             # TP: 거래소에 없으면 체결됨 또는 만료 → ID 클리어
             if state.tp_order_id and state.tp_order_id not in open_ids:
@@ -337,10 +343,10 @@ class SymbolTrader:
                 )
                 state.dca_count = inferred_count
 
-            # SL 재배치
+            # SL 재배치 (Algo Order)
             if state.sl_order_id:
                 try:
-                    self.api.cancel_order(self.symbol, state.sl_order_id)
+                    self.api.cancel_algo_order(self.symbol, state.sl_order_id)
                 except Exception:
                     pass
                 state.sl_order_id = None
@@ -511,10 +517,10 @@ class SymbolTrader:
                     pass
                 state.tp_order_id = None
 
-            # SL 취소
+            # SL 취소 (Algo Order)
             if state.sl_order_id:
                 try:
-                    self.api.cancel_order(self.symbol, state.sl_order_id)
+                    self.api.cancel_algo_order(self.symbol, state.sl_order_id)
                 except Exception:
                     pass
                 state.sl_order_id = None
@@ -820,10 +826,10 @@ class SymbolTrader:
                     pass
         state.dca_orders = []
 
-        # SL 취소
+        # SL 취소 (Algo Order)
         if state.sl_order_id:
             try:
-                self.api.cancel_order(self.symbol, state.sl_order_id)
+                self.api.cancel_algo_order(self.symbol, state.sl_order_id)
             except Exception:
                 pass
             state.sl_order_id = None
@@ -850,7 +856,7 @@ class SymbolTrader:
                     pass
         if old_sl_order_id:
             try:
-                self.api.cancel_order(self.symbol, old_sl_order_id)
+                self.api.cancel_algo_order(self.symbol, old_sl_order_id)
             except Exception:
                 pass
 
@@ -1012,10 +1018,10 @@ class SymbolTrader:
             dca.trigger_price, add_amount, dca.margin, new_avg
         )
 
-        # SL 취소 → 재배치 (같은 base_price, 증가된 amount)
+        # SL 취소 → 재배치 (같은 base_price, 증가된 amount) — Algo Order
         if state.sl_order_id:
             try:
-                self.api.cancel_order(self.symbol, state.sl_order_id)
+                self.api.cancel_algo_order(self.symbol, state.sl_order_id)
             except Exception:
                 pass
             state.sl_order_id = None
