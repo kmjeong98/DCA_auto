@@ -13,6 +13,7 @@ from src.common.api_client import APIClient
 from src.common.config_loader import ConfigLoader
 from src.common.logger import setup_logger
 from src.common.trading_config import TradingConfig
+from src.trading.bnb_manager import BnbManager
 from src.trading.margin_manager import MarginManager
 from src.trading.price_feed import PriceFeed, OrderUpdateFeed
 from src.trading.state_manager import StateManager, TradeLogger
@@ -1140,6 +1141,9 @@ class TradingExecutor:
         # 마진 관리자
         self.margin_manager = MarginManager()
 
+        # BNB 잔고 관리자 (수수료 할인용, mainnet만)
+        self._bnb_manager = BnbManager(self.api, testnet=testnet)
+
         # 심볼 목록
         self.symbols = config.get_symbol_names()
 
@@ -1539,6 +1543,10 @@ class TradingExecutor:
                             trader._check_and_handle_dca_fills("long")
                             trader._check_and_handle_dca_fills("short")
                             trader._try_hot_update_params()
+
+                    # 10분마다: BNB 잔고 확인 및 충전
+                    if poll_counter % 10 == 0:
+                        self._bnb_manager.check_and_refill()
 
         except Exception as e:
             self.logger.error(f"Executor error: {e}")
