@@ -34,6 +34,7 @@ class SymbolTrader:
         config_loader: ConfigLoader,
         safe_name: str,
         cooldown_hours: int = 6,
+        config_path: str = "config/config.json",
     ) -> None:
         self.symbol = symbol
         self.api = api_client
@@ -44,6 +45,7 @@ class SymbolTrader:
         self._params_safe_name = safe_name
         self.cooldown_hours = cooldown_hours
         self._weight_changed = False
+        self._config_path = config_path
 
         # 전략 초기화
         self.strategy = DCAStrategy(params)
@@ -388,10 +390,29 @@ class SymbolTrader:
         except Exception as e:
             self.logger.error(f"Save state error: {e}")
 
+    def _reload_weight_from_config(self) -> None:
+        """config.json에서 현재 심볼의 weight를 다시 읽어 반영."""
+        try:
+            cfg_data = json.loads(Path(self._config_path).read_text(encoding="utf-8"))
+            symbols_cfg = cfg_data.get("symbols", {})
+            if self._params_safe_name in symbols_cfg:
+                new_weight = float(symbols_cfg[self._params_safe_name].get("weight", self.weight))
+                if new_weight != self.weight:
+                    self.logger.info(
+                        f"Weight updated from config: {self.weight:.4f} → {new_weight:.4f}"
+                    )
+                    self.weight = new_weight
+                    self._weight_changed = True
+        except Exception as e:
+            self.logger.warning(f"Config weight reload failed: {e}")
+
     def _try_update_margin(self) -> None:
         """양쪽 모두 비활성일 때 마진 업데이트 시도."""
         if self.long_state.active or self.short_state.active:
             return  # 한쪽이라도 활성이면 업데이트 안 함
+
+        # config에서 최신 weight 반영
+        self._reload_weight_from_config()
 
         try:
             new_balance = self.api.get_account_equity()
@@ -870,6 +891,10 @@ class SymbolTrader:
             return
         if equity <= 0:
             return
+
+        # config에서 최신 weight 반영
+        self._reload_weight_from_config()
+
         try:
             force = self._weight_changed
             self.capital = self.margin_manager.try_update(
@@ -1299,6 +1324,7 @@ class TradingExecutor:
                 config_loader=self.config_loader,
                 safe_name=safe_name,
                 cooldown_hours=self.config.cooldown_hours,
+                config_path=self._config_path,
             )
             trader.initialize()
             self.traders[symbol] = trader
@@ -1476,6 +1502,7 @@ class TradingExecutor:
                         config_loader=self.config_loader,
                         safe_name=safe_name,
                         cooldown_hours=self.config.cooldown_hours,
+                        config_path=self._config_path,
                     )
                     trader.initialize()
                     self.traders[symbol] = trader
