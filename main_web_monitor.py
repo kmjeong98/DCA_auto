@@ -159,6 +159,43 @@ def _snapshot_to_dict(snap: SymbolSnapshot) -> Dict[str, Any]:
     }
 
 
+def _fetch_wallet_info(api: APIClient) -> Dict[str, Any]:
+    """Futures 지갑 정보 조회: USDT, BNB 잔고 + unrealized PnL."""
+    info: Dict[str, Any] = {
+        "usdt_balance": None,
+        "bnb_balance": None,
+        "bnb_value_usd": None,
+        "unrealized_pnl": None,
+        "total_wallet_value": None,
+    }
+    try:
+        account = api.client.account()
+        info["unrealized_pnl"] = float(account.get("totalUnrealizedProfit", 0))
+        total_margin = float(account.get("totalMarginBalance", 0))
+        info["total_wallet_value"] = total_margin
+    except Exception:
+        pass
+
+    try:
+        balances = api.client.balance()
+        for b in balances:
+            if b["asset"] == "USDT":
+                info["usdt_balance"] = float(b["balance"])
+            elif b["asset"] == "BNB":
+                info["bnb_balance"] = float(b["balance"])
+    except Exception:
+        pass
+
+    if info["bnb_balance"] is not None:
+        try:
+            bnb_price = api.get_mark_price("BNBUSDT")
+            info["bnb_value_usd"] = info["bnb_balance"] * bnb_price
+        except Exception:
+            pass
+
+    return info
+
+
 # ── 데이터 수집 스레드 ───────────────────────────────────────
 
 def _data_loop(
@@ -181,10 +218,13 @@ def _data_loop(
 
         snapshots, error = build_snapshots(config_path)
 
+        wallet = {"usdt_balance": None, "bnb_balance": None, "bnb_value_usd": None,
+                  "unrealized_pnl": None, "total_wallet_value": None}
         equity = None
         if not error:
             try:
-                equity = api.get_account_equity()
+                wallet = _fetch_wallet_info(api)
+                equity = wallet["total_wallet_value"]
             except Exception:
                 pass
 
@@ -204,19 +244,43 @@ def _data_loop(
                 active_count += 1
             total_positions += 1
 
+        def _fmt_usd(v):
+            return f"${v:,.2f}" if v is not None else "$---"
+
+        def _fmt_pnl(v):
+            if v is None:
+                return "$---"
+            sign = "+" if v >= 0 else ""
+            return f"{sign}${v:,.2f}"
+
+        def _fmt_bnb(v):
+            return f"{v:.4f}" if v is not None else "---"
+
         with _data_lock:
             _shared_data = {
                 "snapshots": snap_dicts,
                 "equity": equity,
-                "equity_fmt": f"${equity:,.2f}" if equity is not None else "$---",
+                "equity_fmt": _fmt_usd(equity),
                 "total_capital": total_capital,
-                "total_capital_fmt": f"${total_capital:,.2f}",
+                "total_capital_fmt": _fmt_usd(total_capital),
                 "testnet": testnet,
                 "uptime": uptime,
                 "updated_at": now_str,
                 "active_count": active_count,
                 "total_positions": total_positions,
                 "error": error,
+                "wallet": {
+                    "usdt_balance": wallet["usdt_balance"],
+                    "usdt_balance_fmt": _fmt_usd(wallet["usdt_balance"]),
+                    "bnb_balance": wallet["bnb_balance"],
+                    "bnb_balance_fmt": _fmt_bnb(wallet["bnb_balance"]),
+                    "bnb_value_usd": wallet["bnb_value_usd"],
+                    "bnb_value_usd_fmt": _fmt_usd(wallet["bnb_value_usd"]),
+                    "unrealized_pnl": wallet["unrealized_pnl"],
+                    "unrealized_pnl_fmt": _fmt_pnl(wallet["unrealized_pnl"]),
+                    "total_wallet_value": wallet["total_wallet_value"],
+                    "total_wallet_value_fmt": _fmt_usd(wallet["total_wallet_value"]),
+                },
             }
 
         time.sleep(interval)
@@ -232,55 +296,61 @@ _HTML_PAGE = r"""<!DOCTYPE html>
 <title>DCA Trading Bot</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0d1117;color:#c9d1d9;font-family:'JetBrains Mono','Fira Code','SF Mono',Consolas,monospace;font-size:14px;padding:20px}
-.container{max-width:720px;margin:0 auto}
+body{background:#0d1117;color:#c9d1d9;font-family:'JetBrains Mono','Fira Code','SF Mono',Consolas,monospace;font-size:16px;padding:24px}
+.container{max-width:1200px;margin:0 auto}
 
-.header{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px 20px;margin-bottom:16px}
+.header{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:18px 24px;margin-bottom:18px}
 .header-top{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
-.title{font-size:18px;font-weight:700;color:#e6edf3}
-.badge{font-size:12px;font-weight:600;padding:2px 8px;border-radius:4px}
+.title{font-size:22px;font-weight:700;color:#e6edf3}
+.badge{font-size:14px;font-weight:600;padding:3px 10px;border-radius:4px}
 .badge-testnet{background:#1f2d1f;color:#3fb950;border:1px solid #238636}
 .badge-mainnet{background:#2d1f1f;color:#f85149;border:1px solid #da3633}
-.header-meta{display:flex;gap:20px;margin-top:8px;font-size:13px;color:#8b949e}
-.header-meta span{display:flex;align-items:center;gap:4px}
 
-.footer-bar{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 20px;margin-top:16px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:13px;color:#8b949e}
+.wallet-bar{display:grid;grid-template-columns:repeat(5,1fr);gap:16px;margin-top:14px;padding-top:14px;border-top:1px solid #30363d}
+.wallet-item{display:flex;flex-direction:column;gap:2px}
+.wallet-label{font-size:13px;color:#8b949e}
+.wallet-value{font-size:18px;font-weight:700;color:#e6edf3}
+.wallet-value.pnl-pos{color:#3fb950}
+.wallet-value.pnl-neg{color:#f85149}
+.wallet-sub{font-size:12px;color:#6e7681}
 
-.card{background:#161b22;border:1px solid #30363d;border-radius:8px;margin-bottom:12px;overflow:hidden}
-.card-header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #21262d;background:#1c2128}
-.card-symbol{font-size:15px;font-weight:700;color:#e6edf3}
-.card-price{font-size:14px;color:#8b949e}
+.meta-bar{display:flex;gap:24px;margin-top:12px;font-size:14px;color:#8b949e}
+.meta-bar span{display:flex;align-items:center;gap:4px}
+
+.footer-bar{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 24px;margin-top:18px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:14px;color:#8b949e}
+
+.cards-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px}
+
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+.card-header{display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid #21262d;background:#1c2128}
+.card-symbol{font-size:18px;font-weight:700;color:#e6edf3}
+.card-price{font-size:16px;color:#8b949e}
 .card-price .val{color:#e6edf3}
-.card-capital{font-size:13px;color:#8b949e}
+.card-capital{font-size:14px;color:#8b949e}
 
-.card-body{display:flex}
-.card-sides{flex:1;min-width:0}
-.side-row{display:flex;align-items:center;padding:10px 16px;border-bottom:1px solid #21262d;gap:12px}
+.card-body{padding:4px 0}
+.side-row{display:flex;align-items:center;padding:10px 18px;border-bottom:1px solid #21262d;gap:12px}
 .side-row:last-child{border-bottom:none}
-.side-label{font-weight:700;font-size:13px;width:70px;flex-shrink:0}
+.side-label{font-weight:700;font-size:15px;width:80px;flex-shrink:0}
 .side-long .side-label{color:#3fb950}
 .side-short .side-label{color:#f85149}
-.side-detail{font-size:13px;color:#c9d1d9;flex:1}
+.side-detail{font-size:15px;color:#c9d1d9;flex:1}
 .side-detail .dim{color:#8b949e}
-.side-detail .tag{font-size:12px;color:#8b949e;margin-left:8px}
+.side-detail .tag{font-size:13px;color:#8b949e;margin-left:8px}
 .side-waiting{color:#8b949e;font-style:italic}
 .cooldown{color:#d29922}
 
-.params-panel{width:110px;flex-shrink:0;border-left:1px solid #21262d;padding:8px 12px;display:flex;flex-direction:column;justify-content:center;gap:4px;font-size:12px;color:#8b949e}
-.params-panel .p-label{color:#6e7681}
-.params-panel .p-val{color:#c9d1d9;font-weight:600}
-.params-panel .p-est{color:#3fb950;font-weight:700}
+.params-row{display:flex;gap:12px;padding:8px 18px;border-top:1px solid #21262d;background:#1c2128;flex-wrap:wrap}
+.params-row .p-item{font-size:13px;color:#8b949e}
+.params-row .p-val{color:#c9d1d9;font-weight:600}
+.params-row .p-est{color:#3fb950;font-weight:700}
 
-.error-box{background:#2d1f1f;border:1px solid #da3633;border-radius:8px;padding:16px;color:#f85149;margin-bottom:16px}
+.error-box{background:#2d1f1f;border:1px solid #da3633;border-radius:8px;padding:16px;color:#f85149;margin-bottom:16px;font-size:16px}
 
-.dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:6px}
-.dot-green{background:#3fb950}
-.dot-red{background:#f85149}
-
-.pending-row{padding:8px 16px;background:#1a1500;border-top:1px solid #3d2e00;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.pending-icon{color:#d29922;font-size:14px;animation:spin 2s linear infinite}
+.pending-row{padding:8px 18px;background:#1a1500;border-top:1px solid #3d2e00;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pending-icon{color:#d29922;font-size:16px;animation:spin 2s linear infinite}
 @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
-.pending-tag{font-size:12px;color:#d29922;background:#2d2200;border:1px solid #6e5a00;border-radius:4px;padding:1px 6px}
+.pending-tag{font-size:13px;color:#d29922;background:#2d2200;border:1px solid #6e5a00;border-radius:4px;padding:2px 8px}
 </style>
 </head>
 <body>
@@ -290,16 +360,37 @@ body{background:#0d1117;color:#c9d1d9;font-family:'JetBrains Mono','Fira Code','
       <span class="title">DCA Trading Bot</span>
       <span class="badge" id="network-badge">---</span>
     </div>
-    <div class="header-meta">
+    <div class="wallet-bar">
+      <div class="wallet-item">
+        <span class="wallet-label">Total Value</span>
+        <span class="wallet-value" id="wallet-total">$---</span>
+      </div>
+      <div class="wallet-item">
+        <span class="wallet-label">USDT</span>
+        <span class="wallet-value" id="wallet-usdt">$---</span>
+      </div>
+      <div class="wallet-item">
+        <span class="wallet-label">BNB</span>
+        <span class="wallet-value" id="wallet-bnb">---</span>
+        <span class="wallet-sub" id="wallet-bnb-usd">$---</span>
+      </div>
+      <div class="wallet-item">
+        <span class="wallet-label">Unrealized PnL</span>
+        <span class="wallet-value" id="wallet-pnl">$---</span>
+      </div>
+      <div class="wallet-item">
+        <span class="wallet-label">Allocated</span>
+        <span class="wallet-value" id="total-capital">$---</span>
+      </div>
+    </div>
+    <div class="meta-bar">
       <span>Uptime: <b id="uptime">--:--:--</b></span>
-      <span>Equity: <b id="equity">$---</b></span>
-      <span>Capital: <b id="total-capital">$---</b></span>
       <span>Active: <b id="active">-/-</b></span>
     </div>
   </div>
 
   <div id="error-area"></div>
-  <div id="cards"></div>
+  <div class="cards-grid" id="cards"></div>
 
   <div class="footer-bar">
     <span id="updated">--:--:--</span>
@@ -308,20 +399,20 @@ body{background:#0d1117;color:#c9d1d9;font-family:'JetBrains Mono','Fira Code','
 </div>
 
 <script>
-function renderSide(side, label, arrow) {
+function renderSide(side) {
   if (side.active) {
     let tp = side.tp_price_fmt ? `<span class="tag">TP ${side.tp_price_fmt}</span>` : '';
     return `<span>${side.amount.toFixed(4)} @ ${side.avg_price_fmt}</span>` +
            `<span class="tag">DCA ${side.dca_count}/${side.max_dca}</span>${tp}`;
   }
   if (side.cooldown) {
-    return `<span class="cooldown">-- 대기 (쿨다운 ${side.cooldown}) --</span>`;
+    return `<span class="cooldown">쿨다운 ${side.cooldown}</span>`;
   }
-  return `<span class="side-waiting">-- 대기 중 --</span>`;
+  return `<span class="side-waiting">대기 중</span>`;
 }
 
 function render(d) {
-  // Header
+  // Badge
   const badge = document.getElementById('network-badge');
   if (d.testnet) {
     badge.textContent = 'TESTNET';
@@ -330,50 +421,55 @@ function render(d) {
     badge.textContent = 'MAINNET';
     badge.className = 'badge badge-mainnet';
   }
-  document.getElementById('uptime').textContent = d.uptime;
-  document.getElementById('equity').textContent = d.equity_fmt;
+
+  // Wallet
+  const w = d.wallet || {};
+  document.getElementById('wallet-total').textContent = w.total_wallet_value_fmt || '$---';
+  document.getElementById('wallet-usdt').textContent = w.usdt_balance_fmt || '$---';
+  document.getElementById('wallet-bnb').textContent = w.bnb_balance_fmt || '---';
+  document.getElementById('wallet-bnb-usd').textContent = w.bnb_value_usd_fmt ? '≈ ' + w.bnb_value_usd_fmt : '';
+
+  const pnlEl = document.getElementById('wallet-pnl');
+  pnlEl.textContent = w.unrealized_pnl_fmt || '$---';
+  pnlEl.className = 'wallet-value' + (w.unrealized_pnl != null ? (w.unrealized_pnl >= 0 ? ' pnl-pos' : ' pnl-neg') : '');
+
   document.getElementById('total-capital').textContent = d.total_capital_fmt;
+  document.getElementById('uptime').textContent = d.uptime;
   document.getElementById('active').textContent = d.active_count + '/' + d.total_positions;
   document.getElementById('updated').textContent = d.updated_at;
 
   // Error
   const errArea = document.getElementById('error-area');
-  if (d.error) {
-    errArea.innerHTML = `<div class="error-box">${d.error}</div>`;
-  } else {
-    errArea.innerHTML = '';
-  }
+  errArea.innerHTML = d.error ? `<div class="error-box">${d.error}</div>` : '';
 
   // Cards
   const container = document.getElementById('cards');
   let html = '';
   for (const snap of d.snapshots) {
+    const capFmt = snap.capital.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
     html += `<div class="card">
       <div class="card-header">
         <div>
           <span class="card-symbol">${snap.symbol}</span>
-          <span class="card-price"> &nbsp; $<span class="val">${snap.current_price_fmt}</span></span>
+          <span class="card-price"> $<span class="val">${snap.current_price_fmt}</span></span>
         </div>
-        <span class="card-capital">Capital: $${snap.capital.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</span>
+        <span class="card-capital">$${capFmt}</span>
       </div>
       <div class="card-body">
-        <div class="card-sides">
-          <div class="side-row side-long">
-            <span class="side-label">LONG ▲</span>
-            <span class="side-detail">${renderSide(snap.long, 'LONG', '▲')}</span>
-          </div>
-          <div class="side-row side-short">
-            <span class="side-label">SHORT ▼</span>
-            <span class="side-detail">${renderSide(snap.short, 'SHORT', '▼')}</span>
-          </div>
+        <div class="side-row side-long">
+          <span class="side-label">LONG ▲</span>
+          <span class="side-detail">${renderSide(snap.long)}</span>
         </div>
-        <div class="params-panel">
-          <div><span class="p-label">Date</span> <span class="p-val">${snap.params_date ? snap.params_date.slice(5) : '--'}</span></div>
-          <div><span class="p-label">MPR</span> <span class="p-val">${snap.mpr ? snap.mpr.toFixed(1) + '%' : '--'}</span></div>
-          <div><span class="p-label">MDD</span> <span class="p-val">${snap.mdd ? snap.mdd.toFixed(1) + '%' : '--'}</span></div>
-          <div><span class="p-label">SR</span> <span class="p-val">${snap.sharpe ? snap.sharpe.toFixed(2) : '--'}</span></div>
-          <div><span class="p-label">Est</span> <span class="p-est">${snap.est_monthly > 0 ? '$' + snap.est_monthly.toFixed(0) + '/mo' : '--'}</span></div>
+        <div class="side-row side-short">
+          <span class="side-label">SHORT ▼</span>
+          <span class="side-detail">${renderSide(snap.short)}</span>
         </div>
+      </div>
+      <div class="params-row">
+        <span class="p-item">MPR <span class="p-val">${snap.mpr ? snap.mpr.toFixed(1)+'%' : '--'}</span></span>
+        <span class="p-item">MDD <span class="p-val">${snap.mdd ? snap.mdd.toFixed(1)+'%' : '--'}</span></span>
+        <span class="p-item">SR <span class="p-val">${snap.sharpe ? snap.sharpe.toFixed(2) : '--'}</span></span>
+        <span class="p-item">Est <span class="p-est">${snap.est_monthly > 0 ? '$'+snap.est_monthly.toFixed(0)+'/mo' : '--'}</span></span>
       </div>
       ${snap.pending_retries && snap.pending_retries.length > 0 ? `<div class="pending-row"><span class="pending-icon">⟳</span>${snap.pending_retries.map(r => `<span class="pending-tag">${r}</span>`).join('')}</div>` : ''}
     </div>`;
