@@ -42,6 +42,7 @@ class SymbolTrader:
         self.config_loader = config_loader
         self._params_safe_name = safe_name
         self.cooldown_hours = cooldown_hours
+        self._weight_changed = False
 
         # 전략 초기화
         self.strategy = DCAStrategy(params)
@@ -393,9 +394,11 @@ class SymbolTrader:
 
         try:
             new_balance = self.api.get_account_equity()
+            force = self._weight_changed
             self.capital = self.margin_manager.try_update(
-                self.symbol, self.weight, self.capital, new_balance
+                self.symbol, self.weight, self.capital, new_balance, force=force
             )
+            self._weight_changed = False
         except Exception as e:
             self.logger.error(f"Margin update error: {e}")
 
@@ -867,9 +870,11 @@ class SymbolTrader:
         if equity <= 0:
             return
         try:
+            force = self._weight_changed
             self.capital = self.margin_manager.try_update(
-                self.symbol, self.weight, self.capital, equity
+                self.symbol, self.weight, self.capital, equity, force=force
             )
+            self._weight_changed = False
         except Exception as e:
             self.logger.error(f"Margin update error: {e}")
         self._try_update_params()
@@ -1226,7 +1231,7 @@ class TradingExecutor:
             for trader in self.traders.values():
                 trader.cooldown_hours = new_config.cooldown_hours
 
-        # weight 변경 감지
+        # weight 변경 감지 → capital 즉시 재계산 시도
         for safe_name in common:
             old_weight = self.config.symbols[safe_name].weight
             new_weight = new_config.symbols[safe_name].weight
@@ -1234,9 +1239,12 @@ class TradingExecutor:
                 symbol = new_config.symbols[safe_name].symbol
                 if symbol in self.traders:
                     self.traders[symbol].weight = new_weight
+                    self.traders[symbol]._weight_changed = True
                     self.logger.info(
                         f"{symbol} weight changed: {old_weight:.4f} → {new_weight:.4f}"
                     )
+                    # 양쪽 비활성이면 즉시 반영, 활성이면 다음 margin update 시 반영
+                    self.traders[symbol]._try_update_margin()
 
         # 종목 추가
         need_reconnect = False

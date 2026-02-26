@@ -92,25 +92,28 @@ class MarginManager:
         weight: float,
         current_capital: float,
         total_balance: float,
+        force: bool = False,
     ) -> float:
         """
-        마진 업데이트 시도 (증가만 허용).
+        마진 업데이트 시도 (증가만 허용, force 시 감소도 허용).
 
         Args:
             symbol: 심볼
             weight: config.json의 weight
             current_capital: 현재 할당된 capital
             total_balance: Binance 최신 잔고
+            force: True면 감소도 허용 (config weight 변경 시)
 
         Returns:
-            업데이트된 capital (감소 시 기존 값 유지)
+            업데이트된 capital (감소 시 기존 값 유지, force 시 항상 반영)
         """
         new_capital = total_balance * weight
 
-        if new_capital >= current_capital:
+        if force or new_capital >= current_capital:
             self.save(symbol, new_capital, total_balance, weight)
             self.logger.info(
                 f"[{symbol}] Margin updated: ${current_capital:.2f} → ${new_capital:.2f}"
+                f"{' (forced by config change)' if force else ''}"
             )
             return new_capital
 
