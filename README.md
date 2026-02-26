@@ -32,7 +32,6 @@ python3 main_trading.py --testnet
 DCA_auto/
 ├── main_trading.py              # Live trading entry point (PM2 driven)
 ├── main_optimize.py             # GA optimization execution
-├── main_monitor.py              # Standalone monitoring (terminal status dashboard)
 ├── main_web_monitor.py          # Web-based monitoring (browser dashboard)
 ├── ecosystem.config.js          # PM2 run config (venv interpreter specified)
 ├── requirements.txt
@@ -210,41 +209,7 @@ To run on testnet, change `args` in `ecosystem.config.js` to `"--testnet"`.
 
 ### Monitoring
 
-While the bot runs in the background via PM2, you can check live status in a separate terminal.
-
-```bash
-# Default (5s interval, uses config/config.json)
-python3 main_monitor.py
-
-# Custom refresh interval
-python3 main_monitor.py --interval 10
-
-# Mainnet display
-python3 main_monitor.py --mainnet
-```
-
-`main_monitor.py` runs completely independently from the bot process. Reads `data/state/`, `data/params/`, and `data/margins/` files to display the following dashboard in the terminal:
-
-```
-╔════════════════════════════════════════════════════════════════╗
-║  DCA Trading Bot       TESTNET     Uptime: 02:34              ║
-╠════════════════════════════════════════════════════════════════╣
-║  BTC/USDT   $97,231.50                     Capital: $400.00   ║
-║    LONG  ▲  0.0041 @ 97,100.20  DCA 1/5  TP 97,850.0         ║
-║    SHORT ▼  0.0040 @ 97,350.00  DCA 0/5  TP 96,800.0         ║
-║                                                                ║
-║  ETH/USDT   $3,412.80                      Capital: $350.00   ║
-║    LONG  ▲  0.1050 @ 3,400.50   DCA 0/5  TP 3,440.0          ║
-║    SHORT ▼  ── waiting (cooldown 2:15) ──                      ║
-║                                                                ║
-╠════════════════════════════════════════════════════════════════╣
-║  Capital: $750.00  |  Active: 3/4  |  14:32:01                ║
-╚════════════════════════════════════════════════════════════════╝
-```
-
-### Web Monitoring
-
-Browser-based dashboard for a more convenient view. Uses only Python standard library, no extra dependencies.
+Browser-based dashboard running independently from the bot process. Uses only Python standard library, no extra dependencies.
 
 ```bash
 # Default (localhost:8080, auto-opens browser)
