@@ -1,4 +1,4 @@
-"""24/7 실전 매매 메인 프로세스 (PM2 구동)."""
+"""24/7 live trading main process (PM2-driven)."""
 
 import argparse
 import os
@@ -11,17 +11,17 @@ load_dotenv("config/.env")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Binance Futures 양방향 DCA 트레이딩 봇",
+        description="Binance Futures bidirectional DCA trading bot",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-예시:
-  # Testnet에서 기본 설정으로 거래
+Examples:
+  # Trade on Testnet with default settings
   python main_trading.py --testnet
 
-  # Mainnet에서 커스텀 설정 파일 사용
+  # Use custom config file on Mainnet
   python main_trading.py --config config/my_config.json
 
-  # Mainnet 실행
+  # Run on Mainnet
   python main_trading.py --mainnet
         """,
     )
@@ -30,50 +30,50 @@ def parse_args() -> argparse.Namespace:
         "--config",
         type=str,
         default="config/config.json",
-        help="트레이딩 설정 파일 경로 (기본값: config/config.json)",
+        help="Trading config file path (default: config/config.json)",
     )
 
     parser.add_argument(
         "--testnet",
         action="store_true",
         default=None,
-        help="Binance Testnet 사용 (기본값: .env의 USE_TESTNET)",
+        help="Use Binance Testnet (default: USE_TESTNET from .env)",
     )
 
     parser.add_argument(
         "--mainnet",
         action="store_true",
-        help="Binance Mainnet 사용",
+        help="Use Binance Mainnet",
     )
 
     parser.add_argument(
         "--confirm",
         action="store_true",
-        help="Mainnet 확인 프롬프트 건너뛰기 (PM2 등 비대화식 환경용)",
+        help="Skip Mainnet confirmation prompt (for non-interactive environments like PM2)",
     )
 
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="실제 주문 없이 시뮬레이션 모드 (미구현)",
+        help="Simulation mode without real orders (not implemented)",
     )
 
     return parser.parse_args()
 
 
 def validate_environment() -> bool:
-    """환경 변수 검증."""
+    """Validate environment variables."""
     api_key = os.getenv("BINANCE_API_KEY", "")
     api_secret = os.getenv("BINANCE_API_SECRET", "")
 
     if not api_key or api_key == "your_api_key_here":
-        print("Error: BINANCE_API_KEY가 설정되지 않았습니다.")
-        print("  1. .env.example 파일을 .env로 복사하세요")
-        print("  2. Binance API 키를 설정하세요")
+        print("Error: BINANCE_API_KEY is not set.")
+        print("  1. Copy .env.example to .env")
+        print("  2. Set your Binance API key")
         return False
 
     if not api_secret or api_secret == "your_api_secret_here":
-        print("Error: BINANCE_API_SECRET가 설정되지 않았습니다.")
+        print("Error: BINANCE_API_SECRET is not set.")
         return False
 
     return True
@@ -82,11 +82,11 @@ def validate_environment() -> bool:
 def main() -> None:
     args = parse_args()
 
-    # 환경 검증
+    # Validate environment
     if not validate_environment():
         sys.exit(1)
 
-    # Testnet/Mainnet 결정
+    # Determine Testnet/Mainnet
     if args.mainnet:
         testnet = False
     elif args.testnet:
@@ -94,7 +94,7 @@ def main() -> None:
     else:
         testnet = os.getenv("USE_TESTNET", "true").lower() == "true"
 
-    # TradingConfig 로드
+    # Load TradingConfig
     from src.common.trading_config import TradingConfig
 
     try:
@@ -107,20 +107,20 @@ def main() -> None:
         print(f"Error: {e}")
         sys.exit(1)
 
-    # Binance에서 총 잔고 조회 (정보 표시용)
+    # Fetch total balance from Binance (for display)
     from src.common.api_client import APIClient
 
     try:
         api = APIClient(testnet=testnet)
         total_balance = api.get_account_equity()
     except Exception as e:
-        print(f"Error: Binance 잔고 조회 실패 - {e}")
+        print(f"Error: Failed to fetch Binance balance - {e}")
         sys.exit(1)
 
-    # weight 합계 계산
+    # Calculate total weight
     total_weight = sum(cfg.weight for cfg in config.symbols.values())
 
-    # 확인 메시지
+    # Confirmation message
     print("=" * 60)
     print("Binance Futures DCA Trading Bot")
     print("=" * 60)
@@ -140,13 +140,13 @@ def main() -> None:
     print("=" * 60)
 
     if not testnet and not args.confirm:
-        print("\nWARNING: MAINNET 모드입니다. 실제 자금이 사용됩니다!")
-        confirm = input("계속하시겠습니까? (yes/no): ")
+        print("\nWARNING: Running in MAINNET mode. Real funds will be used!")
+        confirm = input("Do you want to continue? (yes/no): ")
         if confirm.lower() != "yes":
-            print("취소됨")
+            print("Cancelled")
             sys.exit(0)
 
-    # Executor 실행
+    # Run executor
     from src.trading.executor import TradingExecutor
 
     executor = TradingExecutor(

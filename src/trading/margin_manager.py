@@ -1,4 +1,4 @@
-"""코인별 마진 영속화 및 업데이트 관리."""
+"""Per-coin margin persistence and update management."""
 
 import json
 from datetime import datetime, timezone
@@ -9,11 +9,11 @@ from src.common.logger import setup_logger
 
 
 class MarginManager:
-    """코인별 마진(자본) 관리.
+    """Per-coin margin (capital) manager.
 
-    - 각 코인의 할당 자본을 data/margins/{SYMBOL}_margin.json에 저장
-    - 프로그램 재시작 시 저장된 capital로 복구 (정전 복구)
-    - 마진 증가만 허용, 감소는 무시 (DCA 특성 보호)
+    - Saves allocated capital for each coin to data/margins/{SYMBOL}_margin.json
+    - Restores saved capital on program restart (power recovery)
+    - Only allows margin increases, ignores decreases (preserves DCA characteristics)
     """
 
     def __init__(self, margin_dir: str = "data/margins") -> None:
@@ -22,7 +22,7 @@ class MarginManager:
         self.logger = setup_logger("margin_manager", "data/logs/margin_manager.log")
 
     def _get_path(self, symbol: str) -> Path:
-        """심볼별 마진 파일 경로."""
+        """Return margin file path for symbol."""
         safe_symbol = symbol.replace("/", "_")
         return self.margin_dir / f"{safe_symbol}_margin.json"
 
@@ -33,15 +33,15 @@ class MarginManager:
         total_balance: float,
     ) -> float:
         """
-        마진 파일 로드 또는 초기 생성.
+        Load margin file or create initial one.
 
         Args:
-            symbol: 심볼 (예: "BTC/USDT")
-            weight: config.json의 weight
-            total_balance: Binance 총 잔고
+            symbol: Symbol (e.g. "BTC/USDT")
+            weight: weight from config.json
+            total_balance: Binance total balance
 
         Returns:
-            할당된 capital
+            Allocated capital
         """
         path = self._get_path(symbol)
 
@@ -58,7 +58,7 @@ class MarginManager:
             except Exception as e:
                 self.logger.warning(f"[{symbol}] Failed to load margin file: {e}")
 
-        # 초기 생성
+        # Initial creation
         capital = total_balance * weight
         self.save(symbol, capital, total_balance, weight)
         self.logger.info(
@@ -74,7 +74,7 @@ class MarginManager:
         total_balance: float,
         weight: float,
     ) -> None:
-        """마진 파일 저장."""
+        """Save margin file."""
         path = self._get_path(symbol)
         data = {
             "symbol": symbol,
@@ -95,17 +95,17 @@ class MarginManager:
         force: bool = False,
     ) -> float:
         """
-        마진 업데이트 시도 (증가만 허용, force 시 감소도 허용).
+        Attempt margin update (increase only, force allows decrease).
 
         Args:
-            symbol: 심볼
-            weight: config.json의 weight
-            current_capital: 현재 할당된 capital
-            total_balance: Binance 최신 잔고
-            force: True면 감소도 허용 (config weight 변경 시)
+            symbol: Symbol
+            weight: weight from config.json
+            current_capital: Currently allocated capital
+            total_balance: Latest Binance balance
+            force: If True, also allows decrease (e.g. when config weight changes)
 
         Returns:
-            업데이트된 capital (감소 시 기존 값 유지, force 시 항상 반영)
+            Updated capital (keeps current if decreased, unless force=True)
         """
         new_capital = total_balance * weight
 
@@ -117,7 +117,7 @@ class MarginManager:
             )
             return new_capital
 
-        # 감소 무시 (DCA 특성상 복구 가능)
+        # Ignore decrease (recoverable given DCA characteristics)
         self.logger.info(
             f"[{symbol}] Margin decrease ignored: "
             f"${current_capital:.2f} → ${new_capital:.2f} (keeping current)"
@@ -125,7 +125,7 @@ class MarginManager:
         return current_capital
 
     def load(self, symbol: str) -> Optional[Dict[str, Any]]:
-        """마진 파일 로드."""
+        """Load margin file."""
         path = self._get_path(symbol)
         if not path.exists():
             return None
@@ -136,7 +136,7 @@ class MarginManager:
             return None
 
     def delete(self, symbol: str) -> None:
-        """코인 삭제 시 마진 파일 제거."""
+        """Remove margin file when coin is deleted."""
         path = self._get_path(symbol)
         if path.exists():
             path.unlink()

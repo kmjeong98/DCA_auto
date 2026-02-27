@@ -1,12 +1,12 @@
-"""웹 기반 모니터링 대시보드 — 브라우저에서 실시간 상태 확인.
+"""Web-based monitoring dashboard — check real-time status in browser.
 
-봇(main_trading.py)이 PM2로 백그라운드 실행 중일 때
-별도 터미널에서 실행하면 브라우저가 자동으로 열린다.
+When the bot (main_trading.py) is running in the background via PM2,
+run this in a separate terminal to auto-open the browser dashboard.
 
-사용법:
+Usage:
   python main_web_monitor.py                    # localhost:8080
-  python main_web_monitor.py --port 3000        # 포트 변경
-  python main_web_monitor.py --mainnet          # MAINNET 모드
+  python main_web_monitor.py --port 3000        # custom port
+  python main_web_monitor.py --mainnet          # MAINNET mode
 """
 
 import argparse
@@ -31,10 +31,10 @@ from src.common.api_client import APIClient
 from src.trading.status_display import SymbolSnapshot
 
 
-# ── 데이터 로딩 유틸 ─────────────────────────────────────────
+# ── Data loading utilities ────────────────────────────────────
 
 def _load_json(path: Path) -> Optional[Dict[str, Any]]:
-    """JSON 파일 로드. 실패 시 None."""
+    """Load JSON file. Returns None on failure."""
     if not path.exists():
         return None
     try:
@@ -45,7 +45,7 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def build_snapshots(config_path: str) -> tuple:
-    """config, state, params, margin 파일에서 스냅샷 리스트 생성.
+    """Build snapshot list from config, state, params, and margin files.
 
     Returns:
         (snapshots, error_msg)
@@ -86,7 +86,7 @@ def build_snapshots(config_path: str) -> tuple:
     return snapshots, None
 
 
-# ── 공유 데이터 ──────────────────────────────────────────────
+# ── Shared data ───────────────────────────────────────────────
 
 _data_lock = threading.Lock()
 _shared_data: Dict[str, Any] = {
@@ -100,7 +100,7 @@ _shared_data: Dict[str, Any] = {
 
 
 def _fmt_price(value: float, sig: int = 5) -> str:
-    """유효숫자 sig자리 이상으로 가격 포맷 (콤마 포함)."""
+    """Format price with at least sig significant figures (with commas)."""
     if value == 0:
         return "0." + "0" * (sig - 1)
     magnitude = math.floor(math.log10(abs(value)))
@@ -109,7 +109,7 @@ def _fmt_price(value: float, sig: int = 5) -> str:
 
 
 def _snapshot_to_dict(snap: SymbolSnapshot) -> Dict[str, Any]:
-    """SymbolSnapshot → JSON 직렬화 가능 dict."""
+    """Serialize SymbolSnapshot to JSON-serializable dict."""
 
     def _sl_remaining(last_sl_time: Optional[datetime], cooldown_hours: int) -> Optional[str]:
         if not last_sl_time:
@@ -160,7 +160,7 @@ def _snapshot_to_dict(snap: SymbolSnapshot) -> Dict[str, Any]:
 
 
 def _fetch_wallet_info(api: APIClient) -> Dict[str, Any]:
-    """Futures 지갑 정보 조회: USDT, BNB 잔고 + unrealized PnL."""
+    """Fetch Futures wallet info: USDT, BNB balances + unrealized PnL."""
     info: Dict[str, Any] = {
         "usdt_balance": None,
         "bnb_balance": None,
@@ -196,7 +196,7 @@ def _fetch_wallet_info(api: APIClient) -> Dict[str, Any]:
     return info
 
 
-# ── 데이터 수집 스레드 ───────────────────────────────────────
+# ── Data collection thread ────────────────────────────────────
 
 def _data_loop(
     config_path: str,
@@ -205,7 +205,7 @@ def _data_loop(
     interval: int,
     start_time: float,
 ) -> None:
-    """백그라운드에서 주기적으로 데이터 수집."""
+    """Periodically collect data in background."""
     global _shared_data
 
     while True:
@@ -286,10 +286,10 @@ def _data_loop(
         time.sleep(interval)
 
 
-# ── HTML 페이지 ──────────────────────────────────────────────
+# ── HTML page ─────────────────────────────────────────────────
 
 _HTML_PAGE = r"""<!DOCTYPE html>
-<html lang="ko">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -406,9 +406,9 @@ function renderSide(side) {
            `<span class="tag">DCA ${side.dca_count}/${side.max_dca}</span>${tp}`;
   }
   if (side.cooldown) {
-    return `<span class="cooldown">쿨다운 ${side.cooldown}</span>`;
+    return `<span class="cooldown">Cooldown ${side.cooldown}</span>`;
   }
-  return `<span class="side-waiting">대기 중</span>`;
+  return `<span class="side-waiting">Waiting</span>`;
 }
 
 function render(d) {
@@ -495,7 +495,7 @@ setInterval(fetchData, 5000);
 """
 
 
-# ── HTTP 핸들러 ──────────────────────────────────────────────
+# ── HTTP handler ──────────────────────────────────────────────
 
 class MonitorHandler(BaseHTTPRequestHandler):
     """GET / → HTML, GET /api/data → JSON."""
@@ -528,20 +528,20 @@ class MonitorHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def log_message(self, format: str, *args: Any) -> None:
-        """HTTP 로그 억제 (터미널 깔끔하게)."""
+        """Suppress HTTP logs (keep terminal clean)."""
         pass
 
 
-# ── 메인 ─────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="DCA Trading Bot — 웹 모니터")
+    parser = argparse.ArgumentParser(description="DCA Trading Bot — Web Monitor")
     parser.add_argument("--config", type=str, default="config/config.json")
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--interval", type=int, default=5, help="데이터 갱신 간격 (초)")
-    parser.add_argument("--testnet", action="store_true", help="TESTNET 모드 강제")
-    parser.add_argument("--mainnet", action="store_true", help="MAINNET 모드 강제")
-    parser.add_argument("--no-open", action="store_true", help="브라우저 자동 열기 비활성화")
+    parser.add_argument("--interval", type=int, default=5, help="Data refresh interval (seconds)")
+    parser.add_argument("--testnet", action="store_true", help="Force TESTNET mode")
+    parser.add_argument("--mainnet", action="store_true", help="Force MAINNET mode")
+    parser.add_argument("--no-open", action="store_true", help="Disable auto browser open")
     return parser.parse_args()
 
 
@@ -557,7 +557,7 @@ def main() -> None:
     api = APIClient(testnet=testnet)
     start_time = time.time()
 
-    # 데이터 수집 스레드
+    # Data collection thread
     t = threading.Thread(
         target=_data_loop,
         args=(args.config, api, testnet, args.interval, start_time),
@@ -565,7 +565,7 @@ def main() -> None:
     )
     t.start()
 
-    # HTTP 서버
+    # HTTP server
     server = HTTPServer(("0.0.0.0", args.port), MonitorHandler)
 
     def shutdown(signum, frame):

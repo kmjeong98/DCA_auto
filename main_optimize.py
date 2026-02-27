@@ -1,4 +1,4 @@
-"""GA 최적화 실행 스크립트 (주기적 구동)."""
+"""GA optimization runner script (periodic execution)."""
 
 import json
 from pathlib import Path
@@ -13,7 +13,7 @@ CONFIG_PATH = "config/optimize_config.json"
 
 
 def load_config(path: str = CONFIG_PATH) -> dict:
-    """optimize_config.json 로드."""
+    """Load optimize_config.json."""
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(
@@ -32,7 +32,7 @@ def main() -> None:
     tickers = config.get("tickers", [])
 
     if not tickers:
-        raise ValueError("tickers 목록이 비어있습니다. config/optimize_config.json을 확인하세요.")
+        raise ValueError("tickers list is empty. Check config/optimize_config.json.")
 
     engine = GAEngine(sim_config=sim_config, ga_config=ga_config)
     engine.run(tickers=tickers)

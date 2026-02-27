@@ -1,4 +1,4 @@
-"""트레이딩 설정 로더 (config.json)."""
+"""Trading config loader (config.json)."""
 
 import json
 from dataclasses import dataclass
@@ -10,20 +10,20 @@ from src.common.logger import setup_logger
 
 @dataclass
 class SymbolConfig:
-    """심볼별 설정."""
+    """Per-symbol configuration."""
     symbol: str      # "BTC/USDT"
-    weight: float    # 자본 배분 비율
+    weight: float    # capital allocation ratio
 
 
 @dataclass
 class TradingConfig:
-    """트레이딩 전역 설정."""
+    """Global trading configuration."""
     cooldown_hours: int
     symbols: Dict[str, SymbolConfig]  # key: "BTC_USDT"
 
     @classmethod
     def load(cls, path: str = "config/config.json") -> "TradingConfig":
-        """config.json 파일 로드."""
+        """Load config.json file."""
         config_path = Path(path)
         if not config_path.exists():
             raise FileNotFoundError(f"Config file not found: {path}")
@@ -46,15 +46,15 @@ class TradingConfig:
         )
 
     def get_symbol_names(self) -> List[str]:
-        """["BTC/USDT", "ETH/USDT", ...] 형식으로 반환."""
+        """Return in ["BTC/USDT", "ETH/USDT", ...] format."""
         return [cfg.symbol for cfg in self.symbols.values()]
 
     def get_safe_names(self) -> List[str]:
-        """["BTC_USDT", "ETH_USDT", ...] 키 형식으로 반환."""
+        """Return ["BTC_USDT", "ETH_USDT", ...] key format."""
         return list(self.symbols.keys())
 
     def get_weight(self, symbol: str) -> float:
-        """심볼의 weight 조회. symbol은 "BTC/USDT" 또는 "BTC_USDT" 형식."""
+        """Get weight for symbol. symbol can be in "BTC/USDT" or "BTC_USDT" format."""
         safe_key = symbol.replace("/", "_")
         cfg = self.symbols.get(safe_key)
         if cfg is None:
@@ -62,17 +62,17 @@ class TradingConfig:
         return cfg.weight
 
     def get_symbol_capital(self, symbol: str, total_balance: float) -> float:
-        """심볼에 할당할 자본 계산."""
+        """Calculate capital allocated to symbol."""
         return total_balance * self.get_weight(symbol)
 
     def validate(self) -> None:
-        """설정 유효성 검증."""
+        """Validate configuration."""
         logger = setup_logger("config", "data/logs/config.log")
 
         if not self.symbols:
             raise ValueError("No symbols configured")
 
-        # params 파일 존재 확인
+        # Check that params files exist
         params_dir = Path("data/params")
         missing = []
         for safe_name in self.symbols:
@@ -86,7 +86,7 @@ class TradingConfig:
                 f"Run main_optimize.py first."
             )
 
-        # weight 합계 표시 (정규화하지 않음)
+        # Display weight total (no normalization)
         total_weight = sum(cfg.weight for cfg in self.symbols.values())
         logger.info(f"Total weight: {total_weight:.4f} ({len(self.symbols)} symbols)")
         if total_weight > 1.0:

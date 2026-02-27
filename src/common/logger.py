@@ -1,4 +1,4 @@
-"""로그 생성 및 저장 로직."""
+"""Log creation and storage logic."""
 
 import logging
 from pathlib import Path

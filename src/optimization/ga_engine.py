@@ -1,4 +1,4 @@
-"""유전 알고리즘 핵심 엔진 (CPU 병렬화 기반 DCA 전략 최적화 - Apple Silicon 호환)."""
+"""Core genetic algorithm engine (CPU-parallelized DCA strategy optimization - Apple Silicon compatible)."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from tqdm.auto import tqdm
 
 from src.common.data_manager import DataManager
 
-# 경고 메시지 제어
+# Suppress warning messages
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.simplefilter('ignore', category=NumbaPerformanceWarning)
@@ -63,7 +63,7 @@ def trades_per_month(tf: str, base_tf: str = "1m", base_trades: int = 10) -> flo
 
 @dataclass
 class SimulationConfig:
-    """시뮬레이션 상수 설정."""
+    """Simulation constant settings."""
     timeframe: str = "1m"
     data_years: int = 5
     start_date_str: Optional[str] = None
@@ -80,7 +80,7 @@ class SimulationConfig:
     cooldown_hours: int = 6
     sharpe_days: int = 14
 
-    # 안전 장치 상수 (OKX-style SL)
+    # Safety constants (OKX-style SL)
     abs_cap_dca: int = 15
     dca_sl_gap: float = 0.005
     liq_buffer: float = 0.98
@@ -89,13 +89,13 @@ class SimulationConfig:
 
     @classmethod
     def from_dict(cls, d: Dict) -> "SimulationConfig":
-        """딕셔너리에서 생성. 없는 키는 기본값 사용."""
+        """Create from dictionary. Missing keys use defaults."""
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
 @dataclass
 class GAConfig:
-    """유전 알고리즘 설정."""
+    """Genetic algorithm settings."""
     min_pop_size: int = 2000
     max_pop_size: int = 5000
 
@@ -111,7 +111,7 @@ class GAConfig:
 
     @classmethod
     def from_dict(cls, d: Dict) -> "GAConfig":
-        """딕셔너리에서 생성. 없는 키는 기본값 사용."""
+        """Create from dictionary. Missing keys use defaults."""
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
@@ -140,13 +140,13 @@ PARAM_BOUNDS_HOST = np.array([
 
 ABSOLUTE_MIN_TRADES = 10.0
 
-# 상수 캡
+# Constant cap
 ABS_CAP_DCA_CONST = 15
 
-# 파라미터 비교용 반올림 정밀도 (표시 단위와 일치)
-# Price Deviation, Take Profit, Stop Loss: 소수점 4자리 (0.0099 = 0.99%)
-# Dev/Vol Multiplier: 소수점 2자리 (x1.51)
-# Max DCA: 정수
+# Rounding precision for parameter comparison (matches display units)
+# Price Deviation, Take Profit, Stop Loss: 4 decimal places (0.0099 = 0.99%)
+# Dev/Vol Multiplier: 2 decimal places (x1.51)
+# Max DCA: integer
 PARAM_ROUND_PRECISION = np.array([
     4, 4, 0, 2, 2, 4,  # Long: dev, tp, max_dca, dev_mult, vol_mult, sl
     4, 4, 0, 2, 2, 4,  # Short: dev, tp, max_dca, dev_mult, vol_mult, sl
@@ -191,7 +191,7 @@ def run_dual_simulation(
 ):
     lev = fixed_leverage
 
-    # 파라미터 로딩
+    # Load parameters
     l_dev = params[P_L_PRICE_DEVIATION]
     l_tp = params[P_L_TAKE_PROFIT]
     l_max_dca = int(params[P_L_MAX_DCA] + 0.5)
@@ -213,7 +213,7 @@ def run_dual_simulation(
 
     balance = initial_capital
 
-    # 초기 진입 자금 확인
+    # Check initial entry funds
     l_active = True
     l_start_fee = (l_base_m * lev) * fee_rate
     if (l_base_m + l_start_fee) > balance:
@@ -258,7 +258,7 @@ def run_dual_simulation(
             curr_step_dev *= s_dev_mult
             curr_vol *= s_vol_mult
 
-    # 변수 초기화
+    # Initialize variables
     l_amt, l_cost, l_avg, l_dca_cnt = 0.0, 0.0, 0.0, 0
     l_base_price = 0.0
 
@@ -280,7 +280,7 @@ def run_dual_simulation(
     l_wait_until = -1
     s_wait_until = -1
 
-    # 첫 진입 (Base)
+    # First entry (Base)
     if l_active:
         trigger_p = start_open
         fill_p = trigger_p * (1.0 + slip_rate)
@@ -317,11 +317,11 @@ def run_dual_simulation(
     prev_close = start_open
     path_points = np.zeros(5, dtype=np.float32)
 
-    # 메인 루프
+    # Main loop
     for i in range(n_bars):
         curr_open = opens[i]
 
-        # Long 신규 진입
+        # New Long entry
         if l_active and l_amt == 0 and i >= l_wait_until:
             trigger_p = curr_open
             fill_p = trigger_p * (1.0 + slip_rate)
@@ -340,7 +340,7 @@ def run_dual_simulation(
             else:
                 l_active = False
 
-        # Short 신규 진입
+        # New Short entry
         if s_active and s_amt == 0 and i >= s_wait_until:
             trigger_p = curr_open
             fill_p = trigger_p * (1.0 - slip_rate)
@@ -833,14 +833,14 @@ def validate_and_fix_side(
 
 @njit(cache=True, fastmath=True)
 def round_genome_inplace(genome):
-    """genome 파라미터를 표시 정밀도에 맞게 반올림 (in-place)."""
+    """Round genome parameters to display precision (in-place)."""
     for i in range(GENOME_SIZE):
         prec = PARAM_ROUND_PRECISION[i]
         if prec == 0:
-            # 정수형 파라미터 (Max DCA)
+            # Integer parameter (Max DCA)
             genome[i] = np.float32(int(genome[i] + 0.5))
         else:
-            # 실수형 파라미터 - 해당 자릿수로 반올림
+            # Float parameter - round to given decimal places
             factor = 10.0 ** prec
             genome[i] = np.float32(int(genome[i] * factor + 0.5) / factor)
 
@@ -852,10 +852,10 @@ def legalize_genome(
     fixed_base_margin, fixed_dca_margin,
     fee_rate, min_sl_price, dca_sl_gap, liq_buffer, max_sl_price_cap
 ):
-    # 먼저 파라미터를 표시 정밀도로 반올림
+    # First round parameters to display precision
     round_genome_inplace(genome)
 
-    # 통합 잔고에서 각 방향이 사용할 수 있는 보수적 한도 (50/50)
+    # Conservative limit each side can use from combined balance (50/50)
     half_capital = initial_capital * 0.5
 
     # Long
@@ -891,12 +891,12 @@ def legalize_genome(
     )
     genome[P_S_MAX_DCA] = np.float32(s_res_dca)
     genome[P_S_SL_RATIO] = np.float32(s_res_sl)
-    
-    # Max DCA와 SL도 반올림 (validate_and_fix_side에서 계산된 값)
+
+    # Also round Max DCA and SL (values calculated in validate_and_fix_side)
     genome[P_L_MAX_DCA] = np.float32(int(genome[P_L_MAX_DCA] + 0.5))
     genome[P_S_MAX_DCA] = np.float32(int(genome[P_S_MAX_DCA] + 0.5))
-    
-    # SL은 소수점 4자리로 반올림
+
+    # Round SL to 4 decimal places
     factor = 10000.0
     genome[P_L_SL_RATIO] = np.float32(int(genome[P_L_SL_RATIO] * factor + 0.5) / factor)
     genome[P_S_SL_RATIO] = np.float32(int(genome[P_S_SL_RATIO] * factor + 0.5) / factor)
@@ -914,13 +914,13 @@ def evaluate_population(
     fixed_leverage,
     min_sl_price, dca_sl_gap, liq_buffer, max_sl_price_cap
 ):
-    """병렬로 전체 population 평가."""
+    """Evaluate entire population in parallel."""
     pop_size = population.shape[0]
     n_bars = opens.shape[0]
-    
+
     for idx in prange(pop_size):
         genome = population[idx].copy()
-        
+
         # Legalize genome
         legalize_genome(
             genome,
@@ -992,8 +992,8 @@ def mutate_gene(val, idx, bounds, rng):
 
 @njit(parallel=True, cache=True, fastmath=True)
 def evolve_population(old_pop, new_pop, fitness, bounds, mut_rate, sorted_indices, elite_count, pop_size):
-    """병렬로 진화 연산 수행."""
-    
+    """Perform evolutionary operations in parallel."""
+
     for tid in prange(pop_size):
         # Elitism
         if tid < elite_count:
@@ -1043,15 +1043,15 @@ def evolve_population(old_pop, new_pop, fitness, bounds, mut_rate, sorted_indice
 
 @njit(cache=True, fastmath=True)
 def round_genome_for_comparison(genome):
-    """파라미터 비교를 위해 표시 정밀도에 맞게 genome 반올림."""
+    """Round genome to display precision for parameter comparison."""
     rounded = np.zeros(GENOME_SIZE, dtype=np.float32)
     for i in range(GENOME_SIZE):
         prec = PARAM_ROUND_PRECISION[i]
         if prec == 0:
-            # 정수형 파라미터 (Max DCA)
+            # Integer parameter (Max DCA)
             rounded[i] = np.float32(int(genome[i] + 0.5))
         else:
-            # 실수형 파라미터 - 해당 자릿수로 반올림
+            # Float parameter - round to given decimal places
             factor = 10.0 ** prec
             rounded[i] = np.float32(int(genome[i] * factor + 0.5) / factor)
     return rounded
@@ -1059,7 +1059,7 @@ def round_genome_for_comparison(genome):
 
 @njit(cache=True, fastmath=True)
 def genomes_are_equal(genome1, genome2):
-    """두 genome이 동일한지 비교 (legalize된 genome 기준 - 이미 반올림됨)."""
+    """Compare two genomes for equality (based on legalized genome - already rounded)."""
     for i in range(GENOME_SIZE):
         if genome1[i] != genome2[i]:
             return False
@@ -1068,9 +1068,9 @@ def genomes_are_equal(genome1, genome2):
 
 @njit(parallel=True, cache=True)
 def init_population(pop, bounds):
-    """병렬로 초기 population 생성."""
+    """Generate initial population in parallel."""
     pop_size = pop.shape[0]
-    
+
     for idx in prange(pop_size):
         for i in range(GENOME_SIZE):
             low = bounds[i, 0]
@@ -1085,44 +1085,44 @@ def init_population(pop, bounds):
 
 @dataclass
 class OptimizationResult:
-    """최적화 결과를 담는 데이터 클래스."""
+    """Data class containing optimization results."""
     symbol: str
     timeframe: str
-    
-    # 성능 지표
+
+    # Performance metrics
     mpr: float  # Monthly Percentage Return
     mdd: float  # Maximum Drawdown
     sharpe: float
     fitness: float
-    
-    # Long 파라미터
+
+    # Long parameters
     long_price_deviation: float
     long_take_profit: float
     long_max_dca: int
     long_dev_multiplier: float
     long_vol_multiplier: float
     long_stop_loss: float
-    
-    # Short 파라미터
+
+    # Short parameters
     short_price_deviation: float
     short_take_profit: float
     short_max_dca: int
     short_dev_multiplier: float
     short_vol_multiplier: float
     short_stop_loss: float
-    
-    # 고정값
+
+    # Fixed values
     leverage: int
-    base_margin_ratio: float  # initial_capital 대비 비율
-    dca_margin_ratio: float   # initial_capital 대비 비율
-    
-    # 메타 정보
+    base_margin_ratio: float  # ratio relative to initial_capital
+    dca_margin_ratio: float   # ratio relative to initial_capital
+
+    # Meta info
     generation: int
     created_at: str  # ISO 8601 format
     data_years: int
-    
+
     def to_dict(self) -> Dict:
-        """JSON 저장용 딕셔너리로 변환."""
+        """Convert to dictionary for JSON storage."""
         return {
             "meta": {
                 "symbol": self.symbol,
@@ -1201,8 +1201,8 @@ class Reporter:
 # ==========================================
 
 class GAEngine:
-    """유전 알고리즘 기반 DCA 전략 최적화 엔진 (CPU 병렬화 버전)."""
-    
+    """Genetic algorithm-based DCA strategy optimization engine (CPU parallelized version)."""
+
     def __init__(
         self,
         sim_config: Optional[SimulationConfig] = None,
@@ -1211,23 +1211,23 @@ class GAEngine:
     ):
         self.sim_config = sim_config or SimulationConfig()
         self.ga_config = ga_config or GAConfig()
-        
-        # params 디렉토리 설정
+
+        # Set params directory
         if params_dir:
             self.params_dir = Path(params_dir)
         else:
-            # 프로젝트 루트의 data/params 폴더
+            # data/params folder in project root
             self.params_dir = self._find_project_root() / "data" / "params"
-        
+
         self.params_dir.mkdir(parents=True, exist_ok=True)
-        
-        # CPU 코어 수 확인
+
+        # Check CPU core count
         self.num_cores = os.cpu_count() or 4
         print(f"[Info] Using {self.num_cores} CPU cores for parallel processing")
-    
+
     @staticmethod
     def _find_project_root() -> Path:
-        """프로젝트 루트 디렉토리 찾기."""
+        """Find project root directory."""
         start = Path(__file__).resolve()
         markers = {".git", "pyproject.toml", "requirements.txt", "setup.cfg", "setup.py"}
         for parent in [start.parent, *start.parents]:
@@ -1235,9 +1235,9 @@ class GAEngine:
                 if (parent / marker).exists():
                     return parent
         return start.parent.parent.parent
-    
+
     def _df_to_arrays(self, df, timeframe: str) -> Dict:
-        """DataFrame을 NumPy 배열로 변환."""
+        """Convert DataFrame to NumPy array."""
         opens = df['Open'].values.astype(np.float32)
         closes = df['Close'].values.astype(np.float32)
         lows = df['Low'].values.astype(np.float32)
@@ -1256,7 +1256,7 @@ class GAEngine:
             'X2': x2.astype(np.float32),
             'Days': float(len(df) / bpd)
         }
-    
+
     def _genome_to_result(
         self,
         ticker: str,
@@ -1264,7 +1264,7 @@ class GAEngine:
         stats: Dict,
         generation: int
     ) -> OptimizationResult:
-        """Genome을 OptimizationResult로 변환."""
+        """Convert genome to OptimizationResult."""
         return OptimizationResult(
             symbol=ticker,
             timeframe=self.sim_config.timeframe,
@@ -1291,20 +1291,20 @@ class GAEngine:
             created_at=datetime.utcnow().isoformat() + "Z",
             data_years=self.sim_config.data_years,
         )
-    
+
     def _save_result(self, result: OptimizationResult) -> str:
-        """결과를 JSON 파일로 저장."""
-        # 파일명: BTC_USDT.json (슬래시를 언더스코어로)
+        """Save result to JSON file."""
+        # Filename: BTC_USDT.json (slash replaced with underscore)
         filename = result.symbol.replace("/", "_") + ".json"
         filepath = self.params_dir / filename
-        
+
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(result.to_dict(), f, indent=2, ensure_ascii=False)
-        
+
         return str(filepath)
-    
+
     def _legalize_genome_host(self, genome: np.ndarray) -> np.ndarray:
-        """호스트에서 genome 합법화."""
+        """Legalize genome on host."""
         cfg = self.sim_config
         result = genome.copy()
         legalize_genome(
@@ -1314,9 +1314,9 @@ class GAEngine:
             cfg.fee_rate, cfg.min_sl_price, cfg.dca_sl_gap, cfg.liq_buffer, cfg.max_sl_price_cap
         )
         return result
-    
+
     def _params_to_genome(self, params: Dict) -> np.ndarray:
-        """저장된 파라미터 JSON을 genome 배열로 변환."""
+        """Convert saved parameter JSON to genome array."""
         genome = np.zeros(GENOME_SIZE, dtype=np.float32)
         lp = params["parameters"]["long"]
         sp = params["parameters"]["short"]
@@ -1338,7 +1338,7 @@ class GAEngine:
         return genome
 
     def _evaluate_genome(self, genome: np.ndarray, data: Dict) -> Dict:
-        """단일 genome을 현재 데이터로 평가하여 stats 반환."""
+        """Evaluate single genome against current data and return stats."""
         cfg = self.sim_config
         tpm = np.float32(trades_per_month(cfg.timeframe))
         s_interval = np.int32(sharpe_interval_bars(cfg.timeframe, cfg.sharpe_days))
@@ -1380,58 +1380,58 @@ class GAEngine:
         return {'fitness': fitness, 'mpr': mpr, 'mdd': mdd, 'sharpe': sharpe}
 
     def optimize_ticker(self, ticker: str) -> Optional[OptimizationResult]:
-        """단일 티커에 대한 최적화 수행."""
+        """Run optimization for a single ticker."""
         cfg = self.sim_config
         ga = self.ga_config
-        
+
         tpm = np.float32(trades_per_month(cfg.timeframe))
         s_interval = np.int32(sharpe_interval_bars(cfg.timeframe, cfg.sharpe_days))
         bars_cooldown = np.int32((cfg.cooldown_hours * 60) / timeframe_minutes(cfg.timeframe))
-        
+
         print(f"\n🚀 Processing {ticker} (Timeframe={cfg.timeframe}, CPU Parallel Mode)...")
-        
+
         df = DataManager.fetch_data(
             ticker,
             timeframe=cfg.timeframe,
             years=cfg.data_years,
             start_date_str=cfg.start_date_str
         )
-        
+
         if df is None or len(df) < 1000:
-            print(f"⚠️ {ticker}: 데이터 부족, 스킵")
+            print(f"⚠️ {ticker}: Insufficient data, skipping")
             return None
-        
+
         data = self._df_to_arrays(df, cfg.timeframe)
         bounds = PARAM_BOUNDS_HOST.copy()
-        
-        # 랜덤 시드 설정
+
+        # Set random seed
         np.random.seed(int(time.time()) % (2**31))
-        
+
         curr_pop_size = ga.min_pop_size
-        
-        # Population 초기화
+
+        # Initialize population
         pop_curr = np.zeros((ga.max_pop_size, GENOME_SIZE), dtype=np.float32)
         pop_next = np.zeros((ga.max_pop_size, GENOME_SIZE), dtype=np.float32)
         results = np.zeros((ga.max_pop_size, 5), dtype=np.float32)
-        
-        # 초기 population 생성
+
+        # Generate initial population
         init_population(pop_curr[:curr_pop_size], bounds)
-        
+
         best_stats = {'fitness': -1e9, 'mpr': 0, 'mdd': 0, 'sharpe': 0}
         best_genome_host = np.zeros(GENOME_SIZE, dtype=np.float32)
         patience = 0
         final_gen = 0
-        
+
         pbar = tqdm(
             range(1, ga.max_generations + 1),
             desc=f"Pop: {curr_pop_size} | MPR: 0.0% | MDD: 0.0% | Sharpe: 0.00 | Pat: 0",
             bar_format="{desc} | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
         )
-        
+
         for gen in pbar:
             final_gen = gen
-            
-            # Population 평가 (병렬)
+
+            # Evaluate population (parallel)
             evaluate_population(
                 pop_curr[:curr_pop_size], results[:curr_pop_size],
                 data['Open'], data['Close'], data['X1'], data['X2'],
@@ -1450,17 +1450,17 @@ class GAEngine:
                 np.float32(cfg.liq_buffer),
                 np.float32(cfg.max_sl_price_cap)
             )
-            
-            # 현재 세대의 평가 크기 저장 (진화 연산에 사용)
+
+            # Save current generation eval size (used in evolutionary operations)
             eval_pop_size = curr_pop_size
-            
+
             fitness_scores = results[:eval_pop_size, 0]
             sorted_indices = np.argsort(fitness_scores)[::-1].astype(np.int32)
-            
+
             best_idx = sorted_indices[0]
             curr_best_fit = fitness_scores[best_idx]
             curr_best_genome = pop_curr[best_idx].copy()
-            
+
             # Legalize current best genome for comparison
             curr_best_legalized = curr_best_genome.copy()
             legalize_genome(
@@ -1469,8 +1469,8 @@ class GAEngine:
                 cfg.fixed_base_margin, cfg.fixed_dca_margin,
                 cfg.fee_rate, cfg.min_sl_price, cfg.dca_sl_gap, cfg.liq_buffer, cfg.max_sl_price_cap
             )
-            
-            # 첫 세대이거나 best_genome_host가 초기 상태인 경우
+
+            # First generation or best_genome_host is at initial state
             if gen == 1 or np.sum(np.abs(best_genome_host)) == 0:
                 best_stats['fitness'] = curr_best_fit
                 best_stats['mpr'] = results[best_idx, 2]
@@ -1479,12 +1479,12 @@ class GAEngine:
                 best_genome_host = curr_best_legalized.copy()
                 patience = 0
             else:
-                # 현재 세대 1등과 이전 best의 파라미터가 동일한지 비교
+                # Compare parameters of current generation top-1 and previous best
                 if genomes_are_equal(curr_best_legalized, best_genome_host):
-                    # 파라미터가 같으면 patience 증가
+                    # Same parameters: increment patience
                     patience += 1
                 elif curr_best_fit > best_stats['fitness']:
-                    # 파라미터가 다르고 fitness가 더 높으면 best 교체
+                    # Different parameters and higher fitness: replace best
                     best_stats['fitness'] = curr_best_fit
                     best_stats['mpr'] = results[best_idx, 2]
                     best_stats['mdd'] = results[best_idx, 3]
@@ -1496,31 +1496,31 @@ class GAEngine:
                         pop_curr[0] = pop_curr[best_idx]
                         curr_pop_size = ga.min_pop_size
                 else:
-                    # 파라미터가 다르지만 fitness가 낮으면 무시
+                    # Different parameters but lower fitness: ignore
                     patience += 1
-            
-            # 체크포인트
+
+            # Checkpoint
             if patience == ga.max_patience_limit // 2:
                 converted_genome = self._legalize_genome_host(best_genome_host)
                 Reporter.print_checkpoint(ticker, gen, converted_genome, best_stats, cfg)
-                
+
                 pop_curr[0] = pop_curr[best_idx]
                 init_population(pop_curr[1:curr_pop_size], bounds)
-            
+
             if patience >= ga.max_patience_limit:
                 break
-            
+
             progress = patience / ga.max_patience_limit
             mut_rate = (1.0 / GENOME_SIZE) + (0.8 * (progress ** 4))
-            
+
             elite_count = int(eval_pop_size * ga.elite_ratio)
             if elite_count < 1:
                 elite_count = 1
-            
-            # 진화 (병렬)
+
+            # Evolve (parallel)
             full_sorted_indices = np.zeros(ga.max_pop_size, dtype=np.int32)
             full_sorted_indices[:eval_pop_size] = sorted_indices
-            
+
             evolve_population(
                 pop_curr[:eval_pop_size],
                 pop_next[:eval_pop_size],
@@ -1531,58 +1531,58 @@ class GAEngine:
                 np.int32(elite_count),
                 np.int32(eval_pop_size)
             )
-            
-            # Population 성장 (다음 세대용)
+
+            # Population growth (for next generation)
             if curr_pop_size < ga.max_pop_size and patience > 0 and patience % ga.growth_interval == 0:
                 new_size = min(int(curr_pop_size * ga.growth_multiplier), ga.max_pop_size)
                 if new_size > curr_pop_size:
                     init_population(pop_next[curr_pop_size:new_size], bounds)
                     curr_pop_size = new_size
-            
+
             pop_curr, pop_next = pop_next, pop_curr
-            
+
             pbar.set_description(
                 f"Pop: {curr_pop_size} | MPR: {best_stats['mpr']:.1f}% | "
                 f"MDD: {best_stats['mdd']:.1f}% | Sharpe: {best_stats['sharpe']:.2f} | Pat: {patience}"
             )
-            
+
             if gen % 100 == 0:
                 converted_genome = self._legalize_genome_host(best_genome_host)
                 Reporter.print_checkpoint(ticker, gen, converted_genome, best_stats, cfg)
-        
-        # 최종 결과
+
+        # Final result
         tqdm.write(f"\n🏁 Finished: {ticker}")
         final_genome = self._legalize_genome_host(best_genome_host)
         Reporter.print_checkpoint(ticker, final_gen, final_genome, best_stats, cfg)
-        
-        # 결과 생성
+
+        # Generate result
         result = self._genome_to_result(ticker, final_genome, best_stats, final_gen)
-        
+
         gc.collect()
-        
+
         return result
-    
+
     def run(self, tickers: List[str]) -> Dict[str, OptimizationResult]:
-        """모든 티커에 대해 최적화 실행 및 결과 저장."""
+        """Run optimization for all tickers and save results."""
         if not tickers:
-            raise ValueError("tickers 리스트가 비어있습니다.")
-        
+            raise ValueError("tickers list is empty.")
+
         cfg = self.sim_config
         tpm = trades_per_month(cfg.timeframe)
         s_interval = sharpe_interval_bars(cfg.timeframe, cfg.sharpe_days)
         bars_cooldown = int((cfg.cooldown_hours * 60) / timeframe_minutes(cfg.timeframe))
-        
+
         print(f"[Config] Timeframe={cfg.timeframe}, Trades/Month={tpm:.3f}, SharpeIntervalBars={s_interval}")
         print(f"[Config] SL Cooldown = {cfg.cooldown_hours} Hours ({bars_cooldown} bars) - OKX Style")
         print(f"[Config] Params will be saved to: {self.params_dir}")
-        
+
         results = {}
 
         for ticker in tickers:
             result = self.optimize_ticker(ticker)
 
             if result:
-                # 기존 파라미터가 있으면 재평가 후 비교
+                # If existing parameters found, re-evaluate and compare
                 safe_name = ticker.replace("/", "_")
                 existing_path = self.params_dir / f"{safe_name}.json"
 
@@ -1591,7 +1591,7 @@ class GAEngine:
                         with open(existing_path, 'r', encoding='utf-8') as f:
                             existing_params = json.load(f)
 
-                        # 기존 파라미터를 현재 데이터로 재평가
+                        # Re-evaluate existing parameters against current data
                         data = self._df_to_arrays(
                             DataManager.fetch_data(
                                 ticker,
@@ -1604,26 +1604,26 @@ class GAEngine:
                         existing_genome = self._params_to_genome(existing_params)
                         existing_stats = self._evaluate_genome(existing_genome, data)
 
-                        print(f"\n📊 {ticker} 기존 파라미터 재평가:")
-                        print(f"   기존: fitness={existing_stats['fitness']:.4f}, "
+                        print(f"\n📊 {ticker} Re-evaluate existing parameters:")
+                        print(f"   Existing: fitness={existing_stats['fitness']:.4f}, "
                               f"MPR={existing_stats['mpr']:.2f}%, "
                               f"MDD={existing_stats['mdd']:.2f}%, "
                               f"Sharpe={existing_stats['sharpe']:.3f}")
-                        print(f"   신규: fitness={result.fitness:.4f}, "
+                        print(f"   New: fitness={result.fitness:.4f}, "
                               f"MPR={result.mpr:.2f}%, "
                               f"MDD={result.mdd:.2f}%, "
                               f"Sharpe={result.sharpe:.3f}")
 
                         if result.fitness <= existing_stats['fitness']:
-                            print(f"⏭️  {ticker} 신규 파라미터가 기존보다 낮아 저장하지 않음")
+                            print(f"⏭️  {ticker} New parameters are inferior to existing, not saving")
                             continue
 
-                        print(f"⬆️  {ticker} 신규 파라미터가 더 우수 → 저장")
+                        print(f"⬆️  {ticker} New parameters are superior → saving")
                     except Exception as e:
-                        print(f"⚠️ {ticker} 기존 파라미터 재평가 실패: {e} → 신규 저장")
+                        print(f"⚠️ {ticker} Failed to re-evaluate existing parameters: {e} → saving new")
 
                 filepath = self._save_result(result)
                 results[ticker] = result
-                print(f"✅ {ticker} 파라미터 저장완료: {filepath}")
+                print(f"✅ {ticker} Parameters saved: {filepath}")
 
         return results

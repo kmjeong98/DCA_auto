@@ -1,4 +1,4 @@
-"""거래소 API 연결 및 공통 호출 (binance-futures-connector 기반)."""
+"""Exchange API connection and common calls (based on binance-futures-connector)."""
 
 import math
 import os
@@ -12,7 +12,7 @@ load_dotenv()
 
 
 class APIClient:
-    """Binance Futures API 클라이언트 (binance-futures-connector 기반)."""
+    """Binance Futures API client (based on binance-futures-connector)."""
 
     TESTNET_BASE = "https://testnet.binancefuture.com"
     MAINNET_BASE = "https://fapi.binance.com"
@@ -34,18 +34,18 @@ class APIClient:
         self._symbol_cache: Dict[str, Dict[str, Any]] = {}
 
     def _ensure_exchange_info(self) -> None:
-        """거래소 정보 로드 (최초 1회)."""
+        """Load exchange info (once on first call)."""
         if self._exchange_info is None:
             self._exchange_info = self.client.exchange_info()
             for s in self._exchange_info["symbols"]:
                 self._symbol_cache[s["symbol"]] = s
 
     def _to_binance_symbol(self, symbol: str) -> str:
-        """BTC/USDT -> BTCUSDT 변환."""
+        """Convert BTC/USDT -> BTCUSDT."""
         return symbol.replace("/", "")
 
     def _get_symbol_info(self, symbol: str) -> Dict[str, Any]:
-        """심볼 정보 조회."""
+        """Fetch symbol info."""
         self._ensure_exchange_info()
         binance_symbol = self._to_binance_symbol(symbol)
         if binance_symbol not in self._symbol_cache:
@@ -53,17 +53,17 @@ class APIClient:
         return self._symbol_cache[binance_symbol]
 
     def _get_filters(self, symbol: str) -> Dict[str, Dict[str, Any]]:
-        """심볼의 필터 정보를 딕셔너리로 반환."""
+        """Return symbol filter info as a dictionary."""
         info = self._get_symbol_info(symbol)
         return {f["filterType"]: f for f in info["filters"]}
 
     def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
-        """레버리지 설정."""
+        """Set leverage."""
         binance_symbol = self._to_binance_symbol(symbol)
         return self.client.change_leverage(symbol=binance_symbol, leverage=leverage)
 
     def set_margin_mode(self, symbol: str, mode: str = "isolated") -> Dict[str, Any]:
-        """마진 모드 설정."""
+        """Set margin mode."""
         binance_symbol = self._to_binance_symbol(symbol)
         margin_type = "ISOLATED" if mode == "isolated" else "CROSSED"
         try:
@@ -74,7 +74,7 @@ class APIClient:
             raise
 
     def set_position_mode(self, hedge_mode: bool = True) -> Dict[str, Any]:
-        """포지션 모드 설정 (Hedge Mode / One-way Mode)."""
+        """Set position mode (Hedge Mode / One-way Mode)."""
         try:
             return self.client.change_position_mode(
                 dualSidePosition="true" if hedge_mode else "false"
@@ -83,12 +83,12 @@ class APIClient:
             if "No need to change position side" in str(e.error_message):
                 return {"info": "already_set"}
             if e.error_code == -4067:
-                # 열린 주문이 있어 변경 불가 — 이미 설정된 것으로 간주
+                # Cannot change due to open orders — treat as already set
                 return {"info": "already_set"}
             raise
 
     def get_balance(self) -> float:
-        """USDT 가용 잔고 조회."""
+        """Fetch USDT available balance."""
         balances = self.client.balance()
         for b in balances:
             if b["asset"] == "USDT":
@@ -96,7 +96,7 @@ class APIClient:
         return 0.0
 
     def get_total_balance(self) -> float:
-        """USDT 총 잔고 조회."""
+        """Fetch USDT total balance."""
         balances = self.client.balance()
         for b in balances:
             if b["asset"] == "USDT":
@@ -104,7 +104,7 @@ class APIClient:
         return 0.0
 
     def get_positions(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
-        """현재 포지션 조회."""
+        """Fetch current positions."""
         kwargs = {}
         if symbol:
             kwargs["symbol"] = self._to_binance_symbol(symbol)
@@ -136,7 +136,7 @@ class APIClient:
         return positions
 
     def get_position(self, symbol: str, side: str) -> Optional[Dict[str, Any]]:
-        """특정 심볼/방향 포지션 조회."""
+        """Fetch position for a specific symbol/side."""
         positions = self.get_positions(symbol)
         for p in positions:
             if p.get("side") == side:
@@ -151,7 +151,7 @@ class APIClient:
         position_side: str = "LONG",
         reduce_only: bool = False,
     ) -> Dict[str, Any]:
-        """시장가 주문."""
+        """Place market order."""
         binance_symbol = self._to_binance_symbol(symbol)
         amount = self.round_amount(symbol, amount)
         kwargs: Dict[str, Any] = {
@@ -177,7 +177,7 @@ class APIClient:
         position_side: str = "LONG",
         reduce_only: bool = False,
     ) -> Dict[str, Any]:
-        """지정가 주문."""
+        """Place limit order."""
         binance_symbol = self._to_binance_symbol(symbol)
         amount = self.round_amount(symbol, amount)
         price = self.round_price(symbol, price)
@@ -204,7 +204,7 @@ class APIClient:
         stop_price: float,
         position_side: str = "LONG",
     ) -> Dict[str, Any]:
-        """스탑로스 주문 (Algo Order STOP_MARKET — mark price 트리거)."""
+        """Place stop-loss order (Algo Order STOP_MARKET — mark price trigger)."""
         binance_symbol = self._to_binance_symbol(symbol)
         amount = self.round_amount(symbol, amount)
         stop_price = self.round_price(symbol, stop_price)
@@ -233,7 +233,7 @@ class APIClient:
         price: float,
         position_side: str = "LONG",
     ) -> Dict[str, Any]:
-        """테이크프로핏 주문 (LIMIT). Hedge Mode에서는 positionSide로 방향 지정."""
+        """Place take-profit order (LIMIT). In Hedge Mode, direction is set via positionSide."""
         binance_symbol = self._to_binance_symbol(symbol)
         amount = self.round_amount(symbol, amount)
         price = self.round_price(symbol, price)
@@ -249,12 +249,12 @@ class APIClient:
         return self._normalize_order_response(result)
 
     def cancel_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
-        """주문 취소."""
+        """Cancel order."""
         binance_symbol = self._to_binance_symbol(symbol)
         return self.client.cancel_order(symbol=binance_symbol, orderId=int(order_id))
 
     def cancel_algo_order(self, symbol: str, algo_id: str) -> Dict[str, Any]:
-        """Algo 주문 취소."""
+        """Cancel algo order."""
         return self.client.sign_request(
             "DELETE",
             "/fapi/v1/algoOrder",
@@ -262,7 +262,7 @@ class APIClient:
         )
 
     def get_open_algo_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
-        """미체결 Algo 주문 조회."""
+        """Fetch open algo orders."""
         params: Dict[str, Any] = {}
         if symbol:
             params["symbol"] = self._to_binance_symbol(symbol)
@@ -271,13 +271,13 @@ class APIClient:
         return [self._normalize_algo_order_response(o) for o in orders]
 
     def cancel_all_orders(self, symbol: str) -> List[Dict[str, Any]]:
-        """심볼의 모든 미체결 주문 취소 (일반 + Algo)."""
+        """Cancel all open orders for a symbol (regular + algo)."""
         binance_symbol = self._to_binance_symbol(symbol)
         try:
             self.client.cancel_open_orders(symbol=binance_symbol)
         except ClientError:
             pass
-        # Algo 주문도 취소
+        # Also cancel algo orders
         try:
             algo_orders = self.get_open_algo_orders(symbol)
             for ao in algo_orders:
@@ -290,7 +290,7 @@ class APIClient:
         return []
 
     def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
-        """미체결 주문 조회."""
+        """Fetch open orders."""
         kwargs = {}
         if symbol:
             kwargs["symbol"] = self._to_binance_symbol(symbol)
@@ -299,30 +299,30 @@ class APIClient:
         return [self._normalize_order_response(o) for o in orders]
 
     def get_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
-        """주문 상태 조회."""
+        """Fetch order status."""
         binance_symbol = self._to_binance_symbol(symbol)
         result = self.client.query_order(symbol=binance_symbol, orderId=int(order_id))
         return self._normalize_order_response(result)
 
     def get_ticker(self, symbol: str) -> Dict[str, Any]:
-        """현재가 조회."""
+        """Fetch current price."""
         binance_symbol = self._to_binance_symbol(symbol)
         return self.client.ticker_price(symbol=binance_symbol)
 
     def get_mark_price(self, symbol: str) -> float:
-        """마크 가격 조회."""
+        """Fetch mark price."""
         binance_symbol = self._to_binance_symbol(symbol)
         result = self.client.mark_price(symbol=binance_symbol)
         return float(result["markPrice"])
 
     def get_min_order_amount(self, symbol: str) -> float:
-        """최소 주문 수량 조회."""
+        """Fetch minimum order quantity."""
         filters = self._get_filters(symbol)
         lot_size = filters.get("LOT_SIZE", {})
         return float(lot_size.get("minQty", 0.001))
 
     def get_precision(self, symbol: str) -> Dict[str, int]:
-        """가격/수량 소수점 정밀도 조회."""
+        """Fetch price/quantity decimal precision."""
         filters = self._get_filters(symbol)
 
         tick_size = float(filters.get("PRICE_FILTER", {}).get("tickSize", "0.01"))
@@ -334,45 +334,45 @@ class APIClient:
         return {"price": price_precision, "amount": amount_precision}
 
     def round_price(self, symbol: str, price: float) -> float:
-        """가격을 심볼의 정밀도에 맞게 반올림."""
+        """Round price to symbol precision."""
         filters = self._get_filters(symbol)
         tick_size = float(filters.get("PRICE_FILTER", {}).get("tickSize", "0.01"))
         return self._round_step(price, tick_size)
 
     def round_amount(self, symbol: str, amount: float) -> float:
-        """수량을 심볼의 정밀도에 맞게 반올림."""
+        """Round amount to symbol precision."""
         filters = self._get_filters(symbol)
         step_size = float(filters.get("LOT_SIZE", {}).get("stepSize", "0.001"))
         return self._round_step(amount, step_size)
 
     def get_account_equity(self) -> float:
-        """totalMarginBalance 조회 (미체결 손익 포함 실제 Equity)."""
+        """Fetch totalMarginBalance (actual equity including unrealized PnL)."""
         account = self.client.account()
         return float(account["totalMarginBalance"])
 
     def new_listen_key(self) -> str:
-        """User Data Stream용 Listen Key 생성."""
+        """Create listen key for User Data Stream."""
         result = self.client.new_listen_key()
         return result["listenKey"]
 
     def renew_listen_key(self, listen_key: str) -> None:
-        """Listen Key 갱신."""
+        """Renew listen key."""
         self.client.renew_listen_key(listenKey=listen_key)
 
     def close_listen_key(self, listen_key: str) -> None:
-        """Listen Key 삭제."""
+        """Delete listen key."""
         self.client.close_listen_key(listenKey=listen_key)
 
     @staticmethod
     def _step_to_precision(step: float) -> int:
-        """stepSize/tickSize를 소수점 자릿수로 변환."""
+        """Convert stepSize/tickSize to decimal precision."""
         if step >= 1:
             return 0
         return max(0, int(round(-math.log10(step))))
 
     @staticmethod
     def _round_step(value: float, step: float) -> float:
-        """값을 step 단위로 내림."""
+        """Floor value to step unit."""
         if step <= 0:
             return value
         precision = max(0, int(round(-math.log10(step))))
@@ -380,7 +380,7 @@ class APIClient:
 
     @staticmethod
     def _normalize_order_response(raw: Dict[str, Any]) -> Dict[str, Any]:
-        """주문 응답을 기존 코드와 호환되는 형식으로 정규화."""
+        """Normalize order response to a format compatible with existing code."""
         return {
             "id": str(raw.get("orderId", "")),
             "symbol": raw.get("symbol", ""),
@@ -398,7 +398,7 @@ class APIClient:
 
     @staticmethod
     def _normalize_algo_order_response(raw: Dict[str, Any]) -> Dict[str, Any]:
-        """Algo Order 응답을 기존 코드와 호환되는 형식으로 정규화."""
+        """Normalize algo order response to a format compatible with existing code."""
         return {
             "id": str(raw.get("algoId", "")),
             "symbol": raw.get("symbol", ""),

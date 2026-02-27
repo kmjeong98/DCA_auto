@@ -1,4 +1,4 @@
-"""DCA 전략 로직 (파라미터 주입형)."""
+"""DCA strategy logic (parameter-injection style)."""
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -7,33 +7,33 @@ from typing import Any, Dict, List, Optional, Tuple
 
 @dataclass
 class DCALevel:
-    """DCA 주문 레벨."""
-    level: int  # DCA 순서 (1, 2, 3, ...)
-    trigger_price: float  # 트리거 가격
-    margin: float  # 마진 금액
-    order_id: Optional[str] = None  # 거래소 주문 ID
+    """DCA order level."""
+    level: int  # DCA sequence number (1, 2, 3, ...)
+    trigger_price: float  # trigger price
+    margin: float  # margin amount
+    order_id: Optional[str] = None  # exchange order ID
 
 
 @dataclass
 class PositionState:
-    """포지션 상태 추적."""
-    side: str  # "long" 또는 "short"
-    active: bool = False  # 포지션 활성 여부
-    amount: float = 0.0  # 보유 수량 (contracts)
-    cost: float = 0.0  # 투입 마진 합계
-    avg_price: float = 0.0  # 평균 진입가
-    base_price: float = 0.0  # 최초 진입가 (DCA/SL 기준)
-    dca_count: int = 0  # 체결된 DCA 횟수
-    last_sl_time: Optional[datetime] = None  # 마지막 SL 시각
-    entry_time: Optional[datetime] = None  # 진입 시각
+    """Position state tracker."""
+    side: str  # "long" or "short"
+    active: bool = False  # whether position is active
+    amount: float = 0.0  # held quantity (contracts)
+    cost: float = 0.0  # total margin invested
+    avg_price: float = 0.0  # average entry price
+    base_price: float = 0.0  # initial entry price (DCA/SL reference)
+    dca_count: int = 0  # number of DCA fills executed
+    last_sl_time: Optional[datetime] = None  # timestamp of last SL
+    entry_time: Optional[datetime] = None  # entry timestamp
 
-    # 관리 중인 주문들
+    # Managed orders
     dca_orders: List[DCALevel] = field(default_factory=list)
     sl_order_id: Optional[str] = None
     tp_order_id: Optional[str] = None
 
     def reset(self) -> None:
-        """포지션 청산 후 리셋."""
+        """Reset after position close."""
         self.active = False
         self.amount = 0.0
         self.cost = 0.0
@@ -46,7 +46,7 @@ class PositionState:
         self.tp_order_id = None
 
     def to_dict(self) -> Dict[str, Any]:
-        """직렬화."""
+        """Serialize."""
         return {
             "side": self.side,
             "active": self.active,
@@ -67,7 +67,7 @@ class PositionState:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PositionState":
-        """역직렬화."""
+        """Deserialize."""
         state = cls(side=data["side"])
         state.active = data.get("active", False)
         state.amount = data.get("amount", 0.0)
@@ -97,14 +97,14 @@ class PositionState:
 
 
 class DCAStrategy:
-    """양방향 DCA 전략 계산기."""
+    """Bidirectional DCA strategy calculator."""
 
     def __init__(self, params: Dict[str, Any]) -> None:
         """
-        전략 초기화.
+        Initialize strategy.
 
         Args:
-            params: 최적화된 파라미터 JSON
+            params: Optimized parameter JSON
                 {
                     "parameters": {"long": {...}, "short": {...}},
                     "fixed_settings": {...}
@@ -112,34 +112,34 @@ class DCAStrategy:
         """
         self.params = params
 
-        # 파라미터 추출
+        # Extract parameters
         self.long_params = params["parameters"]["long"]
         self.short_params = params["parameters"]["short"]
         self.fixed = params["fixed_settings"]
 
-        # 고정 설정
+        # Fixed settings
         self.leverage = self.fixed["leverage"]
         self.base_margin = self.fixed["base_margin_ratio"]
         self.dca_margin = self.fixed["dca_margin_ratio"]
 
     def get_side_params(self, side: str) -> Dict[str, Any]:
-        """방향별 파라미터 반환."""
+        """Return parameters for the given side."""
         return self.long_params if side == "long" else self.short_params
 
     def get_leverage(self, side: str = "") -> int:
-        """레버리지 반환 (Binance는 심볼당 1개이므로 방향 무관)."""
+        """Return leverage (Binance uses one per symbol, side is ignored)."""
         return self.leverage
 
     def calculate_base_margin(self, capital: float, side: str = "") -> float:
         """
-        Base 주문 마진 계산.
+        Calculate base order margin.
 
         Args:
-            capital: 총 자본
-            side: 미사용 (호출 호환성 유지)
+            capital: Total capital
+            side: Unused (kept for call compatibility)
 
         Returns:
-            Base 마진 금액
+            Base margin amount
         """
         return capital * self.base_margin
 
@@ -150,18 +150,18 @@ class DCAStrategy:
         capital: float,
     ) -> List[DCALevel]:
         """
-        DCA 레벨 계산 (ga_engine.py 로직 포팅).
+        Calculate DCA levels (ported from ga_engine.py logic).
 
-        Long: 가격이 base_price * (1 - cumulative_deviation) 아래로 떨어지면 트리거
-        Short: 가격이 base_price * (1 + cumulative_deviation) 위로 오르면 트리거
+        Long: triggers when price falls below base_price * (1 - cumulative_deviation)
+        Short: triggers when price rises above base_price * (1 + cumulative_deviation)
 
         Args:
-            base_price: 최초 진입가
-            side: "long" 또는 "short"
-            capital: 총 자본
+            base_price: Initial entry price
+            side: "long" or "short"
+            capital: Total capital
 
         Returns:
-            DCA 레벨 리스트
+            List of DCA levels
         """
         params = self.get_side_params(side)
 
@@ -174,7 +174,7 @@ class DCAStrategy:
 
         levels: List[DCALevel] = []
 
-        # 기하급수적 deviation 계산
+        # Geometric deviation calculation
         curr_ratio = 1.0
         curr_step_dev = price_deviation
         curr_vol = 1.0
@@ -202,14 +202,14 @@ class DCAStrategy:
 
     def calculate_tp_price(self, avg_price: float, side: str) -> float:
         """
-        Take Profit 가격 계산.
+        Calculate take profit price.
 
         Args:
-            avg_price: 평균 진입가
-            side: "long" 또는 "short"
+            avg_price: Average entry price
+            side: "long" or "short"
 
         Returns:
-            TP 가격
+            TP price
         """
         params = self.get_side_params(side)
         tp_ratio = params["take_profit"]
@@ -221,14 +221,14 @@ class DCAStrategy:
 
     def calculate_sl_price(self, base_price: float, side: str) -> float:
         """
-        Stop Loss 가격 계산 (base_price 기준).
+        Calculate stop loss price (based on base_price).
 
         Args:
-            base_price: 최초 진입가
-            side: "long" 또는 "short"
+            base_price: Initial entry price
+            side: "long" or "short"
 
         Returns:
-            SL 가격
+            SL price
         """
         params = self.get_side_params(side)
         sl_ratio = params["stop_loss"]
@@ -245,15 +245,15 @@ class DCAStrategy:
         side: str,
     ) -> float:
         """
-        마진으로 살 수 있는 포지션 수량 계산.
+        Calculate position quantity purchasable with margin.
 
         Args:
-            margin: 투입 마진
-            price: 현재 가격
-            side: "long" 또는 "short"
+            margin: Margin to invest
+            price: Current price
+            side: "long" or "short"
 
         Returns:
-            포지션 수량 (contracts)
+            Position quantity (contracts)
         """
         leverage = self.get_leverage(side)
         notional = margin * leverage
@@ -268,14 +268,14 @@ class DCAStrategy:
         side: str,
     ) -> Tuple[float, float, float]:
         """
-        DCA 후 새로운 평균가 계산.
+        Calculate new average price after DCA.
 
         Args:
-            current_amount: 현재 보유 수량
-            current_cost: 현재 투입 마진
-            add_amount: 추가 수량
-            add_margin: 추가 마진
-            side: "long" 또는 "short"
+            current_amount: Current held quantity
+            current_cost: Current margin invested
+            add_amount: Additional quantity
+            add_margin: Additional margin
+            side: "long" or "short"
 
         Returns:
             (new_amount, new_cost, new_avg_price)
@@ -294,38 +294,38 @@ class DCAStrategy:
         cooldown_hours: int = 6,
     ) -> bool:
         """
-        신규 진입 가능 여부 (쿨다운 체크).
+        Check whether new entry is allowed (cooldown check).
 
         Args:
-            state: 현재 포지션 상태
-            cooldown_hours: SL 후 대기 시간
+            state: Current position state
+            cooldown_hours: Wait time after SL
 
         Returns:
-            True면 진입 가능
+            True if entry is allowed
         """
-        # 이미 포지션 있으면 불가
+        # Cannot enter if position already active
         if state.active:
             return False
 
-        # SL 이력이 없으면 바로 진입
+        # Enter immediately if no SL history
         if state.last_sl_time is None:
             return True
 
-        # 쿨다운 체크
+        # Cooldown check
         now = datetime.now(timezone.utc)
         elapsed = (now - state.last_sl_time).total_seconds() / 3600
         return elapsed >= cooldown_hours
 
     def check_tp_hit(self, current_price: float, state: PositionState) -> bool:
         """
-        TP 도달 여부 확인.
+        Check whether TP has been reached.
 
         Args:
-            current_price: 현재 가격
-            state: 포지션 상태
+            current_price: Current price
+            state: Position state
 
         Returns:
-            True면 TP 도달
+            True if TP reached
         """
         if not state.active or state.amount <= 0:
             return False
@@ -339,14 +339,14 @@ class DCAStrategy:
 
     def check_sl_hit(self, current_price: float, state: PositionState) -> bool:
         """
-        SL 도달 여부 확인.
+        Check whether SL has been reached.
 
         Args:
-            current_price: 현재 가격
-            state: 포지션 상태
+            current_price: Current price
+            state: Position state
 
         Returns:
-            True면 SL 도달
+            True if SL reached
         """
         if not state.active or state.amount <= 0:
             return False
@@ -364,22 +364,22 @@ class DCAStrategy:
         state: PositionState,
     ) -> Optional[DCALevel]:
         """
-        DCA 트리거 확인.
+        Check DCA trigger.
 
         Args:
-            current_price: 현재 가격
-            state: 포지션 상태
+            current_price: Current price
+            state: Position state
 
         Returns:
-            트리거된 DCA 레벨 또는 None
+            Triggered DCA level or None
         """
         if not state.active:
             return None
 
-        # 아직 체결 안 된 DCA 중 첫 번째만 확인
+        # Check only the first unfilled DCA
         for dca in state.dca_orders:
             if dca.order_id is not None:
-                # 이미 주문 걸려 있으면 스킵 (체결은 거래소에서 처리)
+                # Already has an order on the exchange — skip (fill handled by exchange)
                 continue
 
             if state.side == "long" and current_price <= dca.trigger_price:
@@ -388,4 +388,3 @@ class DCAStrategy:
                 return dca
 
         return None
-

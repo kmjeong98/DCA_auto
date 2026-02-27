@@ -1,4 +1,4 @@
-"""터미널 상태 디스플레이 (In-Place Update)."""
+"""Terminal status display (In-Place Update)."""
 
 import re
 import sys
@@ -17,7 +17,7 @@ _V = "║"
 _ML = "╠"
 _MR = "╣"
 
-# ANSI 컬러
+# ANSI colors
 _GREEN = "\x1b[32m"
 _RED = "\x1b[31m"
 _YELLOW = "\x1b[33m"
@@ -29,9 +29,9 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 class SymbolSnapshot:
-    """디스플레이용 심볼 스냅샷.
+    """Symbol snapshot for display.
 
-    executor(SymbolTrader) 또는 state 파일에서 생성 가능.
+    Can be created from an executor (SymbolTrader) or state files.
     """
 
     def __init__(
@@ -78,7 +78,7 @@ class SymbolSnapshot:
         self.cooldown_hours = cooldown_hours
         self.pending_retries: List[str] = []
 
-        # 파라미터 메타/성능 정보
+        # Parameter meta/performance info
         self.params_date: str = ""
         self.mpr: float = 0.0
         self.mdd: float = 0.0
@@ -86,7 +86,7 @@ class SymbolSnapshot:
 
     @classmethod
     def from_trader(cls, trader: Any) -> "SymbolSnapshot":
-        """SymbolTrader 객체에서 생성."""
+        """Create from SymbolTrader object."""
         strategy = trader.strategy
         long_tp = 0.0
         if trader.long_state.active and trader.long_state.avg_price > 0:
@@ -136,12 +136,12 @@ class SymbolSnapshot:
         margin_data: Dict[str, Any],
         cooldown_hours: int = 6,
     ) -> "SymbolSnapshot":
-        """state/params/margin 파일 데이터에서 생성."""
+        """Create from state/params/margin file data."""
         long_data = state_data.get("long", {})
         short_data = state_data.get("short", {})
         extra = state_data.get("extra", {})
 
-        # 파라미터에서 max_dca, TP ratio 추출
+        # Extract max_dca and TP ratio from parameters
         parameters = params_data.get("parameters", {})
         long_params = parameters.get("long", {})
         short_params = parameters.get("short", {})
@@ -149,7 +149,7 @@ class SymbolSnapshot:
         long_max_dca = int(long_params.get("max_dca", 0))
         short_max_dca = int(short_params.get("max_dca", 0))
 
-        # TP 가격 계산
+        # Calculate TP prices
         long_avg = float(long_data.get("avg_price", 0))
         long_tp = 0.0
         if long_data.get("active") and long_avg > 0:
@@ -162,7 +162,7 @@ class SymbolSnapshot:
             tp_ratio = short_params.get("take_profit", 0)
             short_tp = short_avg * (1.0 - tp_ratio)
 
-        # last_sl_time 파싱
+        # Parse last_sl_time
         long_sl_time = None
         if long_data.get("last_sl_time"):
             try:
@@ -199,7 +199,7 @@ class SymbolSnapshot:
         )
         snap.pending_retries = extra.get("pending_retries", [])
 
-        # 파라미터 메타/성능 정보
+        # Parameter meta/performance info
         meta = params_data.get("meta", {})
         perf = params_data.get("performance", {})
         created_at = meta.get("created_at", "")
@@ -216,20 +216,20 @@ class SymbolSnapshot:
 
 
 class StatusDisplay:
-    """ANSI escape 기반 터미널 상태 표시.
+    """ANSI escape-based terminal status display.
 
-    - TTY인 경우에만 화면 클리어 + 재그리기
-    - PM2 등 non-TTY 환경에서는 아무것도 출력하지 않음
+    - Clears and redraws screen only when TTY is available
+    - Outputs nothing in non-TTY environments (e.g. PM2)
     """
 
-    WIDTH = 62  # 내부 폭 (border 제외)
+    WIDTH = 62  # inner width (excluding border)
 
     def __init__(self, force_tty: bool = False) -> None:
         self._is_tty = force_tty or sys.stdout.isatty()
         self._start_time = time.time()
 
     def _format_uptime(self) -> str:
-        """경과 시간 포맷 (HH:MM:SS)."""
+        """Format elapsed time (HH:MM:SS)."""
         elapsed = int(time.time() - self._start_time)
         hours = elapsed // 3600
         minutes = (elapsed % 3600) // 60
@@ -237,11 +237,11 @@ class StatusDisplay:
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     def _hline(self, left: str, right: str) -> str:
-        """수평선 생성."""
+        """Generate horizontal line."""
         return f"{left}{_H * (self.WIDTH + 2)}{right}"
 
     def _row(self, text: str) -> str:
-        """테이블 행 생성 (패딩 포함)."""
+        """Generate table row (with padding)."""
         display_len = self._visible_len(text)
         pad = self.WIDTH - display_len
         if pad < 0:
@@ -250,7 +250,7 @@ class StatusDisplay:
 
     @staticmethod
     def _fmt_price(value: float, sig: int = 5) -> str:
-        """유효숫자 sig자리 이상으로 가격 포맷 (콤마 포함)."""
+        """Format price with at least sig significant figures (with commas)."""
         if value == 0:
             return "0." + "0" * (sig - 1)
         import math
@@ -260,7 +260,7 @@ class StatusDisplay:
 
     @staticmethod
     def _visible_len(text: str) -> int:
-        """ANSI escape 코드를 제외한 표시 길이."""
+        """Visible length excluding ANSI escape codes."""
         clean = _ANSI_RE.sub("", text)
         length = 0
         for ch in clean:
@@ -282,12 +282,12 @@ class StatusDisplay:
         last_sl_time: Optional[datetime],
         cooldown_hours: int,
     ) -> str:
-        """한 방향(Long/Short) 상태 문자열."""
+        """Status string for one side (Long/Short)."""
         label = "LONG " if side == "long" else "SHORT"
         arrow = "▲" if side == "long" else "▼"
 
         if not active:
-            # 비활성: 쿨다운 확인
+            # Inactive: check cooldown
             if last_sl_time:
                 now = datetime.now(timezone.utc)
                 elapsed_h = (now - last_sl_time).total_seconds() / 3600
@@ -297,12 +297,12 @@ class StatusDisplay:
                     rh, rm2 = divmod(rm, 60)
                     return (
                         f"  {label} {arrow}  "
-                        f"{_YELLOW}── 대기 (쿨다운 {rh}:{rm2:02d}) ──{_RESET}"
+                        f"{_YELLOW}── Cooldown {rh}:{rm2:02d} ──{_RESET}"
                     )
 
-            return f"  {label} {arrow}  {_DIM}── 대기 중 ──{_RESET}"
+            return f"  {label} {arrow}  {_DIM}── Waiting ──{_RESET}"
 
-        # 활성 포지션
+        # Active position
         color = _GREEN if side == "long" else _RED
 
         tp_str = ""
@@ -325,12 +325,12 @@ class StatusDisplay:
         testnet: bool,
         account_equity: Optional[float] = None,
     ) -> None:
-        """화면을 클리어하고 상태를 다시 그린다.
+        """Clear screen and redraw status.
 
         Args:
-            snapshots: 심볼별 스냅샷 리스트
-            testnet: 테스트넷 여부
-            account_equity: Binance 실제 계좌 잔고 (None이면 표시 안 함)
+            snapshots: List of per-symbol snapshots
+            testnet: Whether running on testnet
+            account_equity: Actual Binance account balance (None to hide)
         """
         if not self._is_tty:
             return
@@ -341,18 +341,18 @@ class StatusDisplay:
 
         lines = []
 
-        # ── 헤더 ──
+        # ── Header ──
         lines.append(self._hline(_TL, _TR))
         header = f"DCA Trading Bot       {network}     Uptime: {uptime}"
         lines.append(self._row(header))
         lines.append(self._hline(_ML, _MR))
 
-        # ── 심볼별 상태 ──
+        # ── Per-symbol status ──
         active_count = 0
         total_positions = 0
 
         for snap in snapshots:
-            # 심볼 헤더
+            # Symbol header
             price_str = f"${self._fmt_price(snap.current_price)}" if snap.current_price > 0 else "$---"
             cap_str = f"Capital: ${snap.capital:,.2f}"
             sym_line = f"{_BOLD}{snap.symbol}{_RESET}   {price_str}"
@@ -395,10 +395,10 @@ class StatusDisplay:
                 active_count += 1
             total_positions += 1
 
-            # 빈 줄 (심볼 구분)
+            # Blank line (symbol separator)
             lines.append(self._row(""))
 
-        # ── 푸터 ──
+        # ── Footer ──
         lines.append(self._hline(_ML, _MR))
         equity_str = f"${account_equity:,.2f}" if account_equity is not None else "$---"
         footer = (
@@ -409,7 +409,7 @@ class StatusDisplay:
         lines.append(self._row(footer))
         lines.append(self._hline(_BL, _BR))
 
-        # ── 화면 클리어 + 출력 ──
+        # ── Clear screen + output ──
         output = "\033[H\033[J" + "\n".join(lines) + "\n"
         sys.stdout.write(output)
         sys.stdout.flush()

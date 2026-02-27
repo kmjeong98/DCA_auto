@@ -1,4 +1,4 @@
-"""주문 체결 및 잔고 관리."""
+"""Order execution and balance management."""
 
 import json
 import os
@@ -21,7 +21,7 @@ from src.trading.strategy import DCAStrategy, DCALevel, PositionState
 
 
 class SymbolTrader:
-    """심볼별 트레이딩 관리자."""
+    """Per-symbol trading manager."""
 
     def __init__(
         self,
@@ -47,93 +47,93 @@ class SymbolTrader:
         self._weight_changed = False
         self._config_path = config_path
 
-        # 전략 초기화
+        # Initialize strategy
         self.strategy = DCAStrategy(params)
 
-        # 포지션 상태
+        # Position state
         self.long_state = PositionState(side="long")
         self.short_state = PositionState(side="short")
 
-        # 로깅
+        # Logging
         safe_symbol = symbol.replace("/", "_")
         self.logger = setup_logger(f"trader_{safe_symbol}", f"data/logs/trader_{safe_symbol}.log")
         self.trade_logger = TradeLogger()
 
-        # 상태 관리
+        # State management
         self.state_manager = StateManager()
 
-        # 현재 가격
+        # Current price
         self._current_price: float = 0.0
         self._lock = threading.Lock()
 
-        # 잔고 스냅샷 (PnL 계산용)
+        # Balance snapshot (for PnL calculation)
         self._last_equity: float = 0.0
 
-        # active_params 디렉토리
+        # active_params directory
         self._active_params_dir = Path("data/active_params")
 
-        # 초기화 완료 플래그
+        # Initialization complete flag
         self._initialized = False
 
-        # 제거 대기 플래그 (config에서 삭제된 종목)
+        # Pending removal flag (symbol removed from config)
         self._marked_for_removal = False
 
-        # 주문 재시도 대기 목록
+        # Pending order retry list
         self._pending_sl: Set[str] = set()   # "long" / "short"
         self._pending_tp: Set[str] = set()   # "long" / "short"
         self._pending_dca: List[tuple] = []  # [(side, DCALevel), ...]
 
     def initialize(self) -> None:
-        """거래소 설정 및 초기 포지션 동기화."""
+        """Configure exchange and sync initial positions."""
         self.logger.info(f"Initializing {self.symbol}...")
 
-        # 정전 복구: active_params 파일이 있으면 그것을 우선 사용
+        # Power recovery: use active_params file if available
         active_params = self._load_active_params()
         if active_params:
             self.strategy = DCAStrategy(active_params)
             self.logger.info("Loaded params from active_params (recovery)")
         else:
-            # 최초 시작: 현재 params를 active_params에 저장
+            # First start: save current params to active_params
             self._save_active_params(self.strategy.params)
             self.logger.info("Saved initial params to active_params")
 
-        # Cross 마진 모드 설정
+        # Set cross margin mode
         try:
             self.api.set_margin_mode(self.symbol, "cross")
         except Exception as e:
             self.logger.warning(f"Margin mode setting: {e}")
 
-        # 레버리지 설정
+        # Set leverage
         lev = self.strategy.leverage
         try:
             self.api.set_leverage(self.symbol, lev)
         except Exception as e:
             self.logger.warning(f"Leverage setting: {e}")
 
-        # 저장된 상태 로드
+        # Load saved state
         saved_state = self.state_manager.load_state(self.symbol)
         if saved_state:
             self.long_state = saved_state["long"]
             self.short_state = saved_state["short"]
             self.logger.info("Loaded saved state")
 
-        # 거래소 포지션과 동기화
+        # Sync with exchange positions
         self._sync_with_exchange()
 
-        # 잔고 스냅샷 초기화 (PnL 계산 기준점)
+        # Initialize balance snapshot (PnL baseline)
         try:
             self._last_equity = self.api.get_account_equity()
         except Exception as e:
             self.logger.warning(f"Initial equity snapshot failed: {e}")
 
-        # 가격 피드 시작 전이므로 현재가를 REST로 가져옴 (모니터 표시용)
+        # Before price feed starts, fetch current price via REST (for monitor display)
         if self._current_price <= 0:
             try:
                 self._current_price = self.api.get_mark_price(self.symbol)
             except Exception:
                 pass
 
-        # 동기화 결과를 state 파일에 즉시 반영 (모니터 표시용)
+        # Immediately reflect sync result in state file (for monitor display)
         self._save_state()
 
         self._initialized = True
@@ -143,11 +143,11 @@ class SymbolTrader:
         )
 
     def _sync_with_exchange(self) -> None:
-        """거래소 포지션과 로컬 상태 동기화."""
+        """Sync local state with exchange positions."""
         try:
             positions = self.api.get_positions(self.symbol)
 
-            # 거래소 포지션 확인
+            # Check exchange positions
             exchange_long_amt = 0.0
             exchange_short_amt = 0.0
 
@@ -174,36 +174,36 @@ class SymbolTrader:
                         if self.short_state.base_price == 0:
                             self.short_state.base_price = entry_price
 
-            # 거래소에 포지션이 없는데 로컬 state가 active이면 리셋
+            # Reset if local state is active but no exchange position exists
             if exchange_long_amt == 0.0 and self.long_state.active:
                 self.logger.warning("Long state was active but no exchange position — resetting")
                 sl_time = self.long_state.last_sl_time
                 self.long_state.reset()
-                self.long_state.last_sl_time = sl_time  # 쿨다운 유지
+                self.long_state.last_sl_time = sl_time  # preserve cooldown
 
             if exchange_short_amt == 0.0 and self.short_state.active:
                 self.logger.warning("Short state was active but no exchange position — resetting")
                 sl_time = self.short_state.last_sl_time
                 self.short_state.reset()
-                self.short_state.last_sl_time = sl_time  # 쿨다운 유지
+                self.short_state.last_sl_time = sl_time  # preserve cooldown
 
             self.logger.info(
                 f"Synced - Long: {self.long_state.amount:.4f}, "
                 f"Short: {self.short_state.amount:.4f}"
             )
 
-            # ── 주문 ID 대조 (오프라인 중 체결된 주문 정리) ──
+            # ── Reconcile order IDs (clean up fills that occurred while offline) ──
             self._reconcile_orders()
 
         except Exception as e:
             self.logger.error(f"Sync error: {e}")
 
     def _is_opening_order(self, order: Dict[str, Any], side: str) -> bool:
-        """주문이 포지션을 늘리는(DCA) 주문인지 판별.
+        """Determine if an order is a position-increasing (DCA) order.
 
-        Hedge Mode에서:
-          LONG 포지션: BUY + LONG = 진입/DCA, SELL + LONG = 청산
-          SHORT 포지션: SELL + SHORT = 진입/DCA, BUY + SHORT = 청산
+        In Hedge Mode:
+          LONG position: BUY + LONG = entry/DCA, SELL + LONG = close
+          SHORT position: SELL + SHORT = entry/DCA, BUY + SHORT = close
         """
         pos_side = order.get("positionSide", "")
         order_side = order.get("side", "")
@@ -214,12 +214,12 @@ class SymbolTrader:
             return pos_side == "SHORT" and order_side == "sell"
 
     def _reconcile_orders(self) -> None:
-        """거래소 미체결 주문과 로컬 state 전면 대조.
+        """Full reconciliation between exchange open orders and local state.
 
-        1. 오프라인 중 체결된 DCA 주문 ID를 state에서 제거
-        2. 고아 주문 분류: DCA(포지션 증가)는 state에 편입, TP/SL(청산)은 취소
-        3. SL/TP를 취소하고 현재 포지션 기준으로 재배치
-        4. dca_count를 max_dca - 잔존 DCA 수로 보정
+        1. Remove DCA order IDs from state that were filled while offline
+        2. Classify orphaned orders: DCA (position-increasing) adopted into state, TP/SL (closing) cancelled
+        3. Cancel SL/TP and re-place based on current position
+        4. Correct dca_count to max_dca - remaining DCA count
         """
         try:
             open_orders = self.api.get_open_orders(self.symbol)
@@ -228,7 +228,7 @@ class SymbolTrader:
             self.logger.error(f"Reconcile orders error: {e}")
             return
 
-        # Algo 주문 (SL) 조회
+        # Fetch algo orders (SL)
         algo_open_ids: set = set()
         try:
             algo_orders = self.api.get_open_algo_orders(self.symbol)
@@ -236,14 +236,14 @@ class SymbolTrader:
         except Exception as e:
             self.logger.warning(f"Reconcile algo orders error: {e}")
 
-        # ── 1단계: 각 side의 stale order ID 정리 ──
+        # ── Step 1: Clean up stale order IDs per side ──
         tracked_ids: set = set()
 
         for side in ["long", "short"]:
             state = self.long_state if side == "long" else self.short_state
 
             if not state.active:
-                # 포지션이 없으면 주문도 전부 무효
+                # No position — all orders are invalid
                 if state.dca_orders or state.sl_order_id or state.tp_order_id:
                     self.logger.info(f"[{side}] No position — clearing stale order IDs")
                     state.dca_orders = []
@@ -251,7 +251,7 @@ class SymbolTrader:
                     state.tp_order_id = None
                 continue
 
-            # DCA: 거래소에 없는 주문 = 체결됨 → 리스트에서 제거 (재계산 안 함)
+            # DCA: order not on exchange = filled → remove from list (no recalculation)
             before = len(state.dca_orders)
             state.dca_orders = [
                 d for d in state.dca_orders
@@ -265,30 +265,30 @@ class SymbolTrader:
                     f"(dca_count → {state.dca_count})"
                 )
 
-            # 추적 중인 ID 수집
+            # Collect tracked IDs
             for dca in state.dca_orders:
                 if dca.order_id:
                     tracked_ids.add(dca.order_id)
 
-            # SL: Algo 주문으로 관리 — algo_open_ids에서 확인
+            # SL: managed as algo order — check in algo_open_ids
             if state.sl_order_id and state.sl_order_id not in algo_open_ids:
                 self.logger.info(f"[{side}] SL algo order {state.sl_order_id} no longer open")
                 state.sl_order_id = None
 
-            # TP: 거래소에 없으면 체결됨 또는 만료 → ID 클리어
+            # TP: not on exchange means filled or expired → clear ID
             if state.tp_order_id and state.tp_order_id not in open_ids:
                 self.logger.info(f"[{side}] TP order {state.tp_order_id} no longer open")
                 state.tp_order_id = None
             if state.tp_order_id:
                 tracked_ids.add(state.tp_order_id)
 
-        # ── 2단계: 고아 주문 분류 — DCA는 편입, TP/SL은 취소 ──
+        # ── Step 2: Classify orphaned orders — DCA adopted, TP/SL cancelled ──
         for order in open_orders:
             order_id = str(order["id"])
             if order_id in tracked_ids:
                 continue
 
-            # 어느 side에 속하는지 확인
+            # Determine which side this belongs to
             adopted = False
             for side in ["long", "short"]:
                 state = self.long_state if side == "long" else self.short_state
@@ -296,7 +296,7 @@ class SymbolTrader:
                     continue
 
                 if self._is_opening_order(order, side):
-                    # DCA 주문 → state에 편입
+                    # DCA order → adopt into state
                     price = float(order.get("price", 0))
                     amount = float(order.get("amount", 0))
                     leverage = self.strategy.get_leverage(side)
@@ -318,7 +318,7 @@ class SymbolTrader:
                     break
 
             if not adopted:
-                # 청산 주문 또는 매칭 불가 → 취소
+                # Closing order or unmatched → cancel
                 self.logger.warning(
                     f"Cancelling orphaned order {order_id} "
                     f"({order.get('type')} {order.get('side')} "
@@ -329,13 +329,13 @@ class SymbolTrader:
                 except Exception as e:
                     self.logger.error(f"Cancel orphaned order error: {e}")
 
-        # ── 3단계: 활성 포지션의 SL/TP 재배치 + dca_count 보정 ──
+        # ── Step 3: Re-place SL/TP for active positions + correct dca_count ──
         for side in ["long", "short"]:
             state = self.long_state if side == "long" else self.short_state
             if not state.active or state.amount <= 0:
                 continue
 
-            # dca_count 보정: max_dca - 잔존 DCA 수
+            # Correct dca_count: max_dca - remaining DCA count
             params = self.strategy.get_side_params(side)
             max_dca = int(params.get("max_dca", 0))
             remaining = len(state.dca_orders)
@@ -347,7 +347,7 @@ class SymbolTrader:
                 )
                 state.dca_count = inferred_count
 
-            # SL 재배치 (Algo Order)
+            # Re-place SL (Algo Order)
             if state.sl_order_id:
                 try:
                     self.api.cancel_algo_order(self.symbol, state.sl_order_id)
@@ -356,7 +356,7 @@ class SymbolTrader:
                 state.sl_order_id = None
             self._place_sl_order(side)
 
-            # TP 재배치
+            # Re-place TP
             if state.tp_order_id:
                 try:
                     self.api.cancel_order(self.symbol, state.tp_order_id)
@@ -366,9 +366,9 @@ class SymbolTrader:
             self._place_tp_order(side)
 
     def _save_state(self) -> None:
-        """현재 상태 저장."""
+        """Save current state."""
         try:
-            # pending 재시도 정보
+            # Pending retry info
             pending = []
             for side in self._pending_sl:
                 pending.append(f"SL {side.upper()}")
@@ -391,7 +391,7 @@ class SymbolTrader:
             self.logger.error(f"Save state error: {e}")
 
     def _reload_weight_from_config(self) -> None:
-        """config.json에서 현재 심볼의 weight를 다시 읽어 반영."""
+        """Re-read and apply current symbol's weight from config.json."""
         try:
             cfg_data = json.loads(Path(self._config_path).read_text(encoding="utf-8"))
             symbols_cfg = cfg_data.get("symbols", {})
@@ -407,11 +407,11 @@ class SymbolTrader:
             self.logger.warning(f"Config weight reload failed: {e}")
 
     def _try_update_margin(self) -> None:
-        """양쪽 모두 비활성일 때 마진 업데이트 시도."""
+        """Attempt margin update when both sides are inactive."""
         if self.long_state.active or self.short_state.active:
-            return  # 한쪽이라도 활성이면 업데이트 안 함
+            return  # Skip if either side is active
 
-        # config에서 최신 weight 반영
+        # Apply latest weight from config
         self._reload_weight_from_config()
 
         try:
@@ -424,30 +424,30 @@ class SymbolTrader:
         except Exception as e:
             self.logger.error(f"Margin update error: {e}")
 
-        # 파라미터 업데이트도 같이 시도
+        # Also attempt parameter update
         self._try_update_params()
 
     @staticmethod
     def _trading_params(params: Dict[str, Any]) -> Dict[str, Any]:
-        """트레이딩에 영향을 주는 파라미터만 추출 (meta/performance 제외)."""
+        """Extract only trading-relevant parameters (exclude meta/performance)."""
         return {
             "parameters": params.get("parameters"),
             "fixed_settings": params.get("fixed_settings"),
         }
 
     def _try_update_params(self) -> None:
-        """양쪽 비활성 시 파라미터 변경 감지 및 교체."""
+        """Detect and replace parameter changes when both sides inactive."""
         try:
             new_params = self.config_loader.load(self._params_safe_name)
             if new_params == self.strategy.params:
-                return  # 완전히 동일하면 무시
+                return  # Ignore if completely identical
 
             trading_changed = (
                 self._trading_params(new_params)
                 != self._trading_params(self.strategy.params)
             )
 
-            # meta/performance만 변경되어도 항상 갱신
+            # Always refresh even if only meta/performance changed
             self.strategy = DCAStrategy(new_params)
             self._save_active_params(new_params)
 
@@ -468,34 +468,34 @@ class SymbolTrader:
             self.logger.error(f"Params update error: {e}")
 
     def _try_hot_update_params(self) -> None:
-        """DCA 0회 상태에서 파라미터 핫 업데이트.
+        """Hot-update parameters when DCA count is 0.
 
-        양쪽 모두 비활성이면 기존 _try_update_params()가 처리하므로 스킵.
-        활성인 쪽 중 dca_count > 0이면 안전하지 않으므로 스킵.
-        활성인 쪽의 dca_count가 모두 0이면 DCA/TP/SL을 취소 후 재배치.
+        Skip if both sides inactive (handled by _try_update_params()).
+        Skip if any active side has dca_count > 0 (unsafe).
+        If all active sides have dca_count == 0, cancel and re-place DCA/TP/SL.
         """
-        # 활성인 side 수집
+        # Collect active sides
         active_sides = []
         if self.long_state.active:
             active_sides.append("long")
         if self.short_state.active:
             active_sides.append("short")
 
-        # 양쪽 모두 비활성 → 기존 로직이 처리
+        # Both sides inactive → handled by existing logic
         if not active_sides:
             return
 
-        # 활성인 쪽 중 dca_count > 0 이면 업데이트 불가
+        # Cannot update if any active side has dca_count > 0
         for side in active_sides:
             state = self.long_state if side == "long" else self.short_state
             if state.dca_count > 0:
                 return
 
-        # 새 파라미터 로드 및 비교
+        # Load and compare new parameters
         try:
             new_params = self.config_loader.load(self._params_safe_name)
             if new_params == self.strategy.params:
-                return  # 완전히 동일하면 무시
+                return  # Ignore if completely identical
         except Exception as e:
             self.logger.error(f"Hot params load error: {e}")
             return
@@ -505,7 +505,7 @@ class SymbolTrader:
             != self._trading_params(self.strategy.params)
         )
 
-        # meta/performance만 변경 시에도 항상 갱신
+        # Always refresh even on meta/performance-only changes
         self.strategy = DCAStrategy(new_params)
         self._save_active_params(new_params)
 
@@ -515,7 +515,7 @@ class SymbolTrader:
             )
             return
 
-        # trading params가 변경된 경우에만 주문 재배치
+        # Only re-place orders if trading params changed
         lev = self.strategy.leverage
         try:
             self.api.set_leverage(self.symbol, lev)
@@ -525,7 +525,7 @@ class SymbolTrader:
         for side in active_sides:
             state = self.long_state if side == "long" else self.short_state
 
-            # DCA 주문 취소
+            # Cancel DCA orders
             for dca in state.dca_orders:
                 if dca.order_id:
                     try:
@@ -534,7 +534,7 @@ class SymbolTrader:
                         pass
             state.dca_orders = []
 
-            # TP 취소
+            # Cancel TP
             if state.tp_order_id:
                 try:
                     self.api.cancel_order(self.symbol, state.tp_order_id)
@@ -542,7 +542,7 @@ class SymbolTrader:
                     pass
                 state.tp_order_id = None
 
-            # SL 취소 (Algo Order)
+            # Cancel SL (Algo Order)
             if state.sl_order_id:
                 try:
                     self.api.cancel_algo_order(self.symbol, state.sl_order_id)
@@ -550,7 +550,7 @@ class SymbolTrader:
                     pass
                 state.sl_order_id = None
 
-            # 새 파라미터로 재배치
+            # Re-place with new parameters
             self._place_sl_order(side)
             self._place_tp_order(side)
             self._place_dca_orders(side)
@@ -562,7 +562,7 @@ class SymbolTrader:
         )
 
     def _save_active_params(self, params: Dict[str, Any]) -> None:
-        """현재 사용 중인 파라미터를 active_params에 저장."""
+        """Save currently active parameters to active_params."""
         try:
             self._active_params_dir.mkdir(parents=True, exist_ok=True)
             file_path = self._active_params_dir / f"{self._params_safe_name}.json"
@@ -572,7 +572,7 @@ class SymbolTrader:
             self.logger.error(f"Save active params error: {e}")
 
     def _load_active_params(self) -> Optional[Dict[str, Any]]:
-        """active_params에서 파라미터 로드 (정전 복구용)."""
+        """Load parameters from active_params (for power recovery)."""
         file_path = self._active_params_dir / f"{self._params_safe_name}.json"
         if not file_path.exists():
             return None
@@ -584,8 +584,8 @@ class SymbolTrader:
             return None
 
     def _enter_position(self, side: str) -> bool:
-        """시장가로 Base 포지션 진입."""
-        # 제거 대기 종목은 신규 진입 안 함
+        """Enter base position via market order."""
+        # Do not enter new positions for symbols pending removal
         if self._marked_for_removal:
             return False
 
@@ -594,21 +594,21 @@ class SymbolTrader:
         if state.active:
             return False
 
-        # 쿨다운 체크
+        # Cooldown check
         if not self.strategy.should_enter(state, self.cooldown_hours):
             return False
 
         try:
-            # 마진 계산
+            # Calculate margin
             margin = self.strategy.calculate_base_margin(self.capital, side)
             leverage = self.strategy.get_leverage(side)
 
-            # 현재가 조회
+            # Fetch current price
             price = self._current_price
             if price <= 0:
                 price = self.api.get_mark_price(self.symbol)
 
-            # 수량 계산
+            # Calculate quantity
             notional = margin * leverage
             amount = notional / price
             amount = self.api.round_amount(self.symbol, amount)
@@ -618,7 +618,7 @@ class SymbolTrader:
                 self.logger.warning(f"Amount {amount} < min {min_amount}")
                 return False
 
-            # 시장가 주문
+            # Market order
             position_side = "LONG" if side == "long" else "SHORT"
             order_side = "buy" if side == "long" else "sell"
 
@@ -629,7 +629,7 @@ class SymbolTrader:
             fill_price = float(order.get("average", 0))
             filled_amount = float(order.get("filled", 0))
 
-            # Fallback: 응답에 체결 정보가 없으면 mark price / 주문 수량 사용
+            # Fallback: if no fill info in response, use mark price / order quantity
             if fill_price <= 0:
                 fill_price = self.api.get_mark_price(self.symbol)
                 self.logger.warning(f"No fill price in response, using mark price: {fill_price}")
@@ -637,7 +637,7 @@ class SymbolTrader:
                 filled_amount = amount
                 self.logger.warning(f"No filled amount in response, using order amount: {filled_amount}")
 
-            # 상태 업데이트
+            # Update state
             state.active = True
             state.amount = filled_amount
             state.cost = margin
@@ -652,16 +652,16 @@ class SymbolTrader:
             )
             self.trade_logger.log_entry(self.symbol, side, fill_price, filled_amount, margin)
 
-            # DCA 주문 배치
+            # Place DCA orders
             self._place_dca_orders(side)
 
-            # SL 주문 배치
+            # Place SL order
             self._place_sl_order(side)
 
-            # TP 주문 배치
+            # Place TP order
             self._place_tp_order(side)
 
-            # 잔고 스냅샷 갱신 (진입 후 기준점)
+            # Update balance snapshot (baseline after entry)
             try:
                 self._last_equity = self.api.get_account_equity()
             except Exception:
@@ -675,13 +675,13 @@ class SymbolTrader:
             return False
 
     def _place_dca_orders(self, side: str) -> None:
-        """DCA 지정가 주문 배치."""
+        """Place DCA limit orders."""
         state = self.long_state if side == "long" else self.short_state
 
         if not state.active or state.base_price <= 0:
             return
 
-        # DCA 레벨 계산
+        # Calculate DCA levels
         dca_levels = self.strategy.calculate_dca_levels(
             state.base_price, side, self.capital
         )
@@ -714,7 +714,7 @@ class SymbolTrader:
                 self._pending_dca.append((side, dca))
 
     def _place_sl_order(self, side: str) -> None:
-        """SL 주문 배치 (STOP_MARKET — mark price 트리거). 실패 시 재시도 예약."""
+        """Place SL order (STOP_MARKET — mark price trigger). Schedule retry on failure."""
         state = self.long_state if side == "long" else self.short_state
 
         if not state.active or state.amount <= 0:
@@ -745,14 +745,14 @@ class SymbolTrader:
             self._pending_sl.add(side)
 
     def has_pending_orders(self) -> bool:
-        """재시도 대기 중인 주문이 있는지 확인."""
+        """Check if there are pending retry orders."""
         return bool(self._pending_sl or self._pending_tp or self._pending_dca)
 
     def retry_pending_orders(self) -> None:
-        """실패한 SL/TP/DCA 주문 재시도 (외부에서 주기적으로 호출)."""
+        """Retry failed SL/TP/DCA orders (called periodically from outside)."""
         changed = False
 
-        # SL 재시도
+        # SL retry
         for side in list(self._pending_sl):
             state = self.long_state if side == "long" else self.short_state
             if not state.active or state.amount <= 0 or state.sl_order_id:
@@ -763,7 +763,7 @@ class SymbolTrader:
             if side not in self._pending_sl:
                 changed = True
 
-        # TP 재시도
+        # TP retry
         for side in list(self._pending_tp):
             state = self.long_state if side == "long" else self.short_state
             if not state.active or state.amount <= 0 or state.tp_order_id:
@@ -774,7 +774,7 @@ class SymbolTrader:
             if side not in self._pending_tp:
                 changed = True
 
-        # DCA 재시도
+        # DCA retry
         remaining: List[tuple] = []
         for side, dca in self._pending_dca:
             state = self.long_state if side == "long" else self.short_state
@@ -808,7 +808,7 @@ class SymbolTrader:
             self._save_state()
 
     def _place_tp_order(self, side: str) -> None:
-        """TP 주문 배치 (LIMIT — 정확한 가격에 체결). 실패 시 재시도 예약."""
+        """Place TP order (LIMIT — fills at exact price). Schedule retry on failure."""
         state = self.long_state if side == "long" else self.short_state
 
         if not state.active or state.amount <= 0:
@@ -839,10 +839,10 @@ class SymbolTrader:
             self._pending_tp.add(side)
 
     def _cancel_side_orders(self, side: str) -> None:
-        """한 방향의 모든 주문 취소."""
+        """Cancel all orders for one side."""
         state = self.long_state if side == "long" else self.short_state
 
-        # DCA 주문 취소
+        # Cancel DCA orders
         for dca in state.dca_orders:
             if dca.order_id:
                 try:
@@ -851,7 +851,7 @@ class SymbolTrader:
                     pass
         state.dca_orders = []
 
-        # SL 취소 (Algo Order)
+        # Cancel SL (Algo Order)
         if state.sl_order_id:
             try:
                 self.api.cancel_algo_order(self.symbol, state.sl_order_id)
@@ -859,7 +859,7 @@ class SymbolTrader:
                 pass
             state.sl_order_id = None
 
-        # TP 취소
+        # Cancel TP
         if state.tp_order_id:
             try:
                 self.api.cancel_order(self.symbol, state.tp_order_id)
@@ -872,7 +872,7 @@ class SymbolTrader:
         old_dca_orders: List,
         old_sl_order_id: Optional[str],
     ) -> None:
-        """이전 포지션의 미체결 주문 취소 (TP는 이미 체결이므로 스킵)."""
+        """Cancel open orders from previous position (skip TP as it was already filled)."""
         for dca in old_dca_orders:
             if dca.order_id:
                 try:
@@ -886,13 +886,13 @@ class SymbolTrader:
                 pass
 
     def _try_update_margin_with_equity(self, equity: float) -> None:
-        """equity를 외부에서 받아 마진 업데이트 (REST 중복 호출 방지)."""
+        """Update margin using externally provided equity (avoids duplicate REST calls)."""
         if self.long_state.active or self.short_state.active:
             return
         if equity <= 0:
             return
 
-        # config에서 최신 weight 반영
+        # Apply latest weight from config
         self._reload_weight_from_config()
 
         try:
@@ -906,11 +906,11 @@ class SymbolTrader:
         self._try_update_params()
 
     def _handle_tp(self, side: str) -> None:
-        """TP 체결 처리 — 재진입 우선, 정리 후처리."""
+        """Handle TP fill — re-entry first, cleanup after."""
         state = self.long_state if side == "long" else self.short_state
 
-        # ── ① 즉시 재진입 (최우선) ──
-        # old order ID 임시 보관 후 reset → 바로 시장가 진입
+        # ── ① Immediate re-entry (top priority) ──
+        # Temporarily save old order ID, reset → enter market order immediately
         old_amount = state.amount
         old_dca_orders = state.dca_orders
         old_sl_order_id = state.sl_order_id
@@ -918,10 +918,10 @@ class SymbolTrader:
 
         self._enter_position(side)
 
-        # ── ② 이전 주문 정리 (시장가 전송 후) ──
+        # ── ② Clean up previous orders (after market order sent) ──
         self._cancel_old_orders(old_dca_orders, old_sl_order_id)
 
-        # ── ③ PnL 계산 (1회만 호출) ──
+        # ── ③ Calculate PnL (called once) ──
         try:
             new_equity = self.api.get_account_equity()
             pnl = new_equity - self._last_equity
@@ -938,16 +938,16 @@ class SymbolTrader:
             self.symbol, side, self._current_price, old_amount, pnl
         )
 
-        # ── ④ 마진 업데이트 (equity 재사용, 중복 호출 제거) ──
+        # ── ④ Update margin (reuse equity, avoid duplicate calls) ──
         self._try_update_margin_with_equity(new_equity)
 
         self._save_state()
 
     def _handle_sl(self, side: str) -> None:
-        """SL 체결 처리."""
+        """Handle SL fill."""
         state = self.long_state if side == "long" else self.short_state
 
-        # SL은 이미 체결 → old DCA + TP만 취소 (SL 스킵)
+        # SL already filled → cancel only old DCA + TP (skip SL)
         old_dca_orders = state.dca_orders
         old_tp_order_id = state.tp_order_id
         state.dca_orders = []
@@ -966,7 +966,7 @@ class SymbolTrader:
             except Exception:
                 pass
 
-        # 잔고 기반 PnL 계산 (1회만)
+        # Balance-based PnL calculation (once)
         try:
             new_equity = self.api.get_account_equity()
             pnl = new_equity - self._last_equity
@@ -983,17 +983,17 @@ class SymbolTrader:
             self.symbol, side, self._current_price, state.amount, pnl
         )
 
-        # 상태 리셋 (쿨다운 유지)
+        # Reset state (preserve cooldown)
         state.reset()
         state.last_sl_time = datetime.now(timezone.utc)
 
-        # 마진 업데이트 (equity 재사용)
+        # Update margin (reuse equity)
         self._try_update_margin_with_equity(new_equity)
 
         self._save_state()
 
     def _check_and_handle_dca_fills(self, side: str) -> None:
-        """DCA 체결 확인 및 처리 (폴링 백업용)."""
+        """Detect and handle DCA fills (polling backup)."""
         state = self.long_state if side == "long" else self.short_state
 
         if not state.active or not state.dca_orders:
@@ -1023,7 +1023,7 @@ class SymbolTrader:
             self.logger.error(f"DCA check error: {e}")
 
     def _process_dca_fill(self, side: str, dca: DCALevel) -> None:
-        """DCA 체결 처리 — avg 재계산, SL/TP 재배치."""
+        """Handle DCA fill — recalculate avg, re-place SL/TP."""
         state = self.long_state if side == "long" else self.short_state
 
         leverage = self.strategy.get_leverage(side)
@@ -1049,7 +1049,7 @@ class SymbolTrader:
             dca.trigger_price, add_amount, dca.margin, new_avg
         )
 
-        # SL 취소 → 재배치 (같은 base_price, 증가된 amount) — Algo Order
+        # Cancel SL → re-place (same base_price, increased amount) — Algo Order
         if state.sl_order_id:
             try:
                 self.api.cancel_algo_order(self.symbol, state.sl_order_id)
@@ -1058,7 +1058,7 @@ class SymbolTrader:
             state.sl_order_id = None
         self._place_sl_order(side)
 
-        # TP 취소 → 재배치 (새 avg_price, 증가된 amount)
+        # Cancel TP → re-place (new avg_price, increased amount)
         if state.tp_order_id:
             try:
                 self.api.cancel_order(self.symbol, state.tp_order_id)
@@ -1068,22 +1068,22 @@ class SymbolTrader:
         self._place_tp_order(side)
 
     def on_order_filled(self, order_id: str, data: Dict[str, Any]) -> None:
-        """User Data Stream에서 주문 체결 감지."""
+        """Detect order fills from User Data Stream."""
         with self._lock:
             for side in ["long", "short"]:
                 state = self.long_state if side == "long" else self.short_state
 
-                # TP 체결 확인
+                # Check TP fill
                 if state.tp_order_id == order_id:
                     self._handle_tp(side)
                     return
 
-                # SL 체결 확인
+                # Check SL fill
                 if state.sl_order_id == order_id:
                     self._handle_sl(side)
                     return
 
-                # DCA 체결 확인
+                # Check DCA fill
                 for dca in list(state.dca_orders):
                     if dca.order_id == order_id:
                         state.dca_orders.remove(dca)
@@ -1092,14 +1092,14 @@ class SymbolTrader:
                         return
 
     def on_price_update(self, price: float) -> None:
-        """가격 업데이트 콜백."""
+        """Price update callback."""
         with self._lock:
             self._current_price = price
 
         if not self._initialized:
             return
 
-        # Long 포지션 처리
+        # Handle Long position
         if self.long_state.active:
             if self.strategy.check_tp_hit(price, self.long_state):
                 self._handle_tp("long")
@@ -1109,7 +1109,7 @@ class SymbolTrader:
             if self.strategy.should_enter(self.long_state, self.cooldown_hours):
                 self._enter_position("long")
 
-        # Short 포지션 처리
+        # Handle Short position
         if self.short_state.active:
             if self.strategy.check_tp_hit(price, self.short_state):
                 self._handle_tp("short")
@@ -1120,7 +1120,7 @@ class SymbolTrader:
                 self._enter_position("short")
 
     def get_status(self) -> Dict[str, Any]:
-        """현재 상태 요약."""
+        """Current state summary."""
         return {
             "symbol": self.symbol,
             "capital": self.capital,
@@ -1140,13 +1140,13 @@ class SymbolTrader:
         }
 
     def shutdown(self) -> None:
-        """종료 처리."""
+        """Shutdown handler."""
         self._save_state()
         self.logger.info(f"Shutdown {self.symbol}")
 
 
 class TradingExecutor:
-    """메인 트레이딩 실행기."""
+    """Main trading executor."""
 
     def __init__(
         self,
@@ -1160,55 +1160,55 @@ class TradingExecutor:
         self.logger = setup_logger("executor", "data/logs/executor.log")
         self.config_loader = ConfigLoader()
 
-        # API 클라이언트
+        # API client
         self.api = APIClient(testnet=testnet)
 
-        # 마진 관리자
+        # Margin manager
         self.margin_manager = MarginManager()
 
-        # BNB 잔고 관리자 (수수료 할인용, mainnet만)
+        # BNB balance manager (for fee discount, mainnet only)
         self._bnb_manager = BnbManager(self.api, testnet=testnet)
 
-        # 심볼 목록
+        # Symbol list
         self.symbols = config.get_symbol_names()
 
         if not self.symbols:
             raise ValueError("No symbols to trade")
 
-        # 심볼별 트레이더
+        # Per-symbol trader
         self.traders: Dict[str, SymbolTrader] = {}
 
-        # WebSocket 피드
+        # WebSocket feeds
         self.price_feed: Optional[PriceFeed] = None
         self.order_feed: Optional[OrderUpdateFeed] = None
         self._listen_key: Optional[str] = None
         self._listen_key_timer: Optional[threading.Timer] = None
 
-        # 실행 상태
+        # Running state
         self._running = False
         self._shutdown_event = threading.Event()
 
-        # config.json 핫 리로드
+        # config.json hot reload
         self._config_path: str = config_path
         self._config_mtime: float = 0.0
-        self._pending_removals: Set[str] = set()  # 제거 대기 종목 (symbol 형식)
+        self._pending_removals: Set[str] = set()  # Symbols pending removal (in symbol format)
 
     @staticmethod
     def _raw_to_symbol(raw_symbol: str) -> str:
-        """BTCUSDT → BTC/USDT 변환."""
-        # 일반적인 USDT 쌍 처리
+        """Convert BTCUSDT → BTC/USDT."""
+        # Handle common USDT pairs
         if raw_symbol.endswith("USDT"):
             base = raw_symbol[:-4]
             return f"{base}/USDT"
         return raw_symbol
 
     def _on_price_update(self, symbol: str, price: float) -> None:
-        """가격 업데이트 콜백 (PriceFeed에서 호출)."""
+        """Price update callback (called from PriceFeed)."""
         if symbol in self.traders:
             self.traders[symbol].on_price_update(price)
 
     def _on_order_update(self, data: Dict[str, Any]) -> None:
-        """주문 업데이트 콜백 (OrderUpdateFeed에서 호출)."""
+        """Order update callback (called from OrderUpdateFeed)."""
         raw_symbol = data.get("symbol", "")
         symbol = self._raw_to_symbol(raw_symbol)
         status = data.get("status", "")
@@ -1219,20 +1219,20 @@ class TradingExecutor:
             self.traders[symbol].on_order_filled(order_id, data)
 
     def _on_position_update(self, data: Dict[str, Any]) -> None:
-        """포지션 업데이트 콜백 (로깅용)."""
+        """Position update callback (for logging)."""
         self.logger.debug(f"Position update: {data}")
 
-    # ---- config.json 핫 리로드 ----
+    # ---- config.json hot reload ----
 
     def _check_config_update(self) -> None:
-        """config.json 변경 감지 및 처리 (mtime 비교)."""
+        """Detect and process config.json changes (mtime comparison)."""
         try:
             current_mtime = os.path.getmtime(self._config_path)
         except OSError:
-            return  # 파일 접근 불가 시 무시
+            return  # Ignore if file is inaccessible
 
         if current_mtime == self._config_mtime:
-            return  # 변경 없음
+            return  # No changes
 
         self._config_mtime = current_mtime
         self.logger.info("config.json change detected, reloading...")
@@ -1243,7 +1243,7 @@ class TradingExecutor:
             self.logger.error(f"Config reload failed: {e}")
             return
 
-        # 현재 vs 새 심볼 비교
+        # Compare current vs new symbols
         old_symbols = set(self.config.symbols.keys())  # safe_name: "BTC_USDT"
         new_symbols = set(new_config.symbols.keys())
 
@@ -1251,7 +1251,7 @@ class TradingExecutor:
         removed = old_symbols - new_symbols
         common = old_symbols & new_symbols
 
-        # cooldown_hours 변경 반영
+        # Apply cooldown_hours changes
         if new_config.cooldown_hours != self.config.cooldown_hours:
             self.logger.info(
                 f"Cooldown changed: {self.config.cooldown_hours}h → "
@@ -1260,7 +1260,7 @@ class TradingExecutor:
             for trader in self.traders.values():
                 trader.cooldown_hours = new_config.cooldown_hours
 
-        # weight 변경 감지 → capital 즉시 재계산 시도
+        # Detect weight changes → attempt immediate capital recalculation
         for safe_name in common:
             old_weight = self.config.symbols[safe_name].weight
             new_weight = new_config.symbols[safe_name].weight
@@ -1272,10 +1272,10 @@ class TradingExecutor:
                     self.logger.info(
                         f"{symbol} weight changed: {old_weight:.4f} → {new_weight:.4f}"
                     )
-                    # 양쪽 비활성이면 즉시 반영, 활성이면 다음 margin update 시 반영
+                    # Apply immediately if both inactive, defer to next margin update if active
                     self.traders[symbol]._try_update_margin()
 
-        # 종목 추가
+        # Add symbols
         need_reconnect = False
         for safe_name in added:
             sym_cfg = new_config.symbols[safe_name]
@@ -1283,21 +1283,21 @@ class TradingExecutor:
             if self._add_trader(safe_name, sym_cfg):
                 need_reconnect = True
 
-        # 종목 제거 — 즉시 종료 아닌 제거 대기 등록
+        # Remove symbols — register for pending removal, not immediate shutdown
         for safe_name in removed:
             symbol = self.config.symbols[safe_name].symbol
             if symbol in self.traders:
                 self._mark_trader_for_removal(symbol)
 
-        # config 객체 교체
+        # Replace config object
         self.config = new_config
 
-        # PriceFeed 재연결 (심볼 추가 시만)
+        # Reconnect PriceFeed (only when symbols added)
         if need_reconnect:
             self._reconnect_price_feed()
 
     def _add_trader(self, safe_name: str, sym_cfg: Any) -> bool:
-        """런타임에 새 트레이더 추가. 성공 시 True 반환."""
+        """Add new trader at runtime. Returns True on success."""
         symbol = sym_cfg.symbol
 
         if symbol in self.traders:
@@ -1305,10 +1305,10 @@ class TradingExecutor:
             return False
 
         try:
-            # 파라미터 로드
+            # Load parameters
             params = self.config_loader.load(safe_name)
 
-            # 마진 초기화
+            # Initialize margin
             total_balance = self.api.get_account_equity()
             capital = self.margin_manager.load_or_init(
                 symbol, sym_cfg.weight, total_balance
@@ -1337,7 +1337,7 @@ class TradingExecutor:
             return False
 
     def _mark_trader_for_removal(self, symbol: str) -> None:
-        """종목을 제거 대기로 등록 (신규 진입 차단)."""
+        """Register symbol for pending removal (blocks new entries)."""
         if symbol not in self.traders:
             return
 
@@ -1348,15 +1348,15 @@ class TradingExecutor:
         )
 
     def _remove_trader(self, symbol: str) -> None:
-        """트레이더 완전 제거 (양쪽 비활성 확인 후 호출)."""
+        """Fully remove trader (call after confirming both sides inactive)."""
         trader = self.traders.get(symbol)
         if not trader:
             return
 
-        # state 저장 + 종료
+        # Save state + shutdown
         trader.shutdown()
 
-        # 미체결 주문 전부 취소
+        # Cancel all open orders
         try:
             self.api.cancel_all_orders(symbol)
         except Exception as e:
@@ -1367,11 +1367,11 @@ class TradingExecutor:
 
         self.logger.info(f"Trader removed: {symbol}")
 
-        # PriceFeed 재연결 (구독 심볼 변경)
+        # Reconnect PriceFeed (subscription symbols changed)
         self._reconnect_price_feed()
 
     def _process_pending_removals(self) -> None:
-        """제거 대기 종목 중 양쪽 비활성인 것을 실제 제거."""
+        """Actually remove pending symbols where both sides are inactive."""
         for symbol in list(self._pending_removals):
             trader = self.traders.get(symbol)
             if not trader:
@@ -1385,7 +1385,7 @@ class TradingExecutor:
                 self._remove_trader(symbol)
 
     def _reconnect_price_feed(self) -> None:
-        """현재 traders 기준으로 PriceFeed 재연결."""
+        """Reconnect PriceFeed based on current traders."""
         if not self.price_feed:
             return
 
@@ -1407,7 +1407,7 @@ class TradingExecutor:
         self.price_feed.start()
 
     def _start_listen_key_renewal(self) -> None:
-        """Listen Key 30분마다 갱신."""
+        """Renew Listen Key every 30 minutes."""
         if not self._running or not self._listen_key:
             return
         try:
@@ -1415,14 +1415,14 @@ class TradingExecutor:
             self.logger.debug("Listen key renewed")
         except Exception as e:
             self.logger.error(f"Listen key renewal failed: {e}")
-            # 새 키 생성 시도
+            # Attempt to generate new key
             try:
                 self._listen_key = self.api.new_listen_key()
                 self.logger.info("New listen key created")
             except Exception as e2:
                 self.logger.error(f"New listen key failed: {e2}")
 
-        # 다음 갱신 예약 (30분)
+        # Schedule next renewal (30 minutes)
         if self._running:
             self._listen_key_timer = threading.Timer(
                 30 * 60, self._start_listen_key_renewal
@@ -1431,7 +1431,7 @@ class TradingExecutor:
             self._listen_key_timer.start()
 
     def _start_order_retry_loop(self) -> None:
-        """주문 재시도 백그라운드 스레드 시작 (15초 간격)."""
+        """Start background retry thread (15-second interval)."""
         def _retry_worker():
             while self._running and not self._shutdown_event.is_set():
                 self._shutdown_event.wait(timeout=15)
@@ -1445,7 +1445,7 @@ class TradingExecutor:
         t.start()
 
     def _setup_signal_handlers(self) -> None:
-        """시그널 핸들러 설정."""
+        """Set up signal handlers."""
         def handle_shutdown(signum, frame):
             self.logger.info(f"Received signal {signum}, shutting down...")
             self._shutdown_event.set()
@@ -1454,7 +1454,7 @@ class TradingExecutor:
         signal.signal(signal.SIGTERM, handle_shutdown)
 
     def run(self) -> None:
-        """메인 트레이딩 루프 시작."""
+        """Start main trading loop."""
         self.logger.info("=" * 50)
         self.logger.info("Starting Trading Executor")
         self.logger.info(f"Testnet: {self.testnet}")
@@ -1465,14 +1465,14 @@ class TradingExecutor:
         self._setup_signal_handlers()
 
         try:
-            # Hedge Mode 설정
+            # Set Hedge Mode
             self.api.set_position_mode(hedge_mode=True)
 
-            # Binance에서 총 잔고 조회
+            # Fetch total balance from Binance
             total_balance = self.api.get_account_equity()
             self.logger.info(f"Total wallet balance: ${total_balance:.2f}")
 
-            # 심볼별 자본 배분 표시
+            # Display per-symbol capital allocation
             for safe_name, sym_cfg in self.config.symbols.items():
                 cap = total_balance * sym_cfg.weight
                 self.logger.info(
@@ -1480,14 +1480,14 @@ class TradingExecutor:
                     f"capital=${cap:.2f}"
                 )
 
-            # 트레이더 초기화
+            # Initialize traders
             for safe_name, sym_cfg in self.config.symbols.items():
                 symbol = sym_cfg.symbol
                 try:
-                    # 파라미터 로드
+                    # Load parameters
                     params = self.config_loader.load(safe_name)
 
-                    # 마진 로드 또는 초기화
+                    # Load or initialize margin
                     capital = self.margin_manager.load_or_init(
                         symbol, sym_cfg.weight, total_balance
                     )
@@ -1515,7 +1515,7 @@ class TradingExecutor:
             if not self.traders:
                 raise RuntimeError("No traders initialized")
 
-            # 가격 피드 시작
+            # Start price feed
             self.price_feed = PriceFeed(
                 symbols=list(self.traders.keys()),
                 on_price_update=self._on_price_update,
@@ -1523,7 +1523,7 @@ class TradingExecutor:
             )
             self.price_feed.start()
 
-            # User Data Stream 시작
+            # Start User Data Stream
             try:
                 self._listen_key = self.api.new_listen_key()
                 self.order_feed = OrderUpdateFeed(
@@ -1540,16 +1540,16 @@ class TradingExecutor:
 
             self.logger.info("Trading started")
 
-            # config.json 초기 mtime 저장
+            # Save initial config.json mtime
             try:
                 self._config_mtime = os.path.getmtime(self._config_path)
             except OSError:
                 self._config_mtime = 0.0
 
-            # 주문 재시도 백그라운드 스레드 시작
+            # Start order retry background thread
             self._start_order_retry_loop()
 
-            # 메인 루프 (상태 모니터링 + 폴링 백업)
+            # Main loop (status monitoring + polling backup)
             poll_counter = 0
             while not self._shutdown_event.is_set():
                 self._shutdown_event.wait(timeout=60)
@@ -1558,11 +1558,11 @@ class TradingExecutor:
                     poll_counter += 1
                     self._log_status()
 
-                    # 제거 대기 종목 처리 (매 60초)
+                    # Process pending removals (every 60 seconds)
                     if self._pending_removals:
                         self._process_pending_removals()
 
-                    # 5분마다: config 변경 감지 + DCA 폴링 백업 + 핫 파라미터 업데이트
+                    # Every 5 minutes: detect config changes + DCA polling backup + hot param update
                     if poll_counter % 5 == 0:
                         self._check_config_update()
 
@@ -1571,7 +1571,7 @@ class TradingExecutor:
                             trader._check_and_handle_dca_fills("short")
                             trader._try_hot_update_params()
 
-                    # 10분마다: BNB 잔고 확인 및 충전
+                    # Every 10 minutes: check and refill BNB balance
                     if poll_counter % 10 == 0:
                         self._bnb_manager.check_and_refill()
 
@@ -1583,7 +1583,7 @@ class TradingExecutor:
             self.shutdown()
 
     def _log_status(self) -> None:
-        """현재 상태 파일 로깅."""
+        """Log current state to file."""
         for symbol, trader in self.traders.items():
             status = trader.get_status()
             self.logger.info(
@@ -1596,30 +1596,30 @@ class TradingExecutor:
             )
 
     def shutdown(self) -> None:
-        """안전한 종료."""
+        """Safe shutdown."""
         self.logger.info("Shutting down...")
         self._running = False
 
-        # Listen Key 갱신 타이머 종료
+        # Stop Listen Key renewal timer
         if self._listen_key_timer:
             self._listen_key_timer.cancel()
 
-        # User Data Stream 종료
+        # Stop User Data Stream
         if self.order_feed:
             self.order_feed.stop()
 
-        # Listen Key 삭제
+        # Delete Listen Key
         if self._listen_key:
             try:
                 self.api.close_listen_key(self._listen_key)
             except Exception:
                 pass
 
-        # 가격 피드 종료
+        # Stop price feed
         if self.price_feed:
             self.price_feed.stop()
 
-        # 트레이더 종료
+        # Shutdown traders
         for trader in self.traders.values():
             trader.shutdown()
 

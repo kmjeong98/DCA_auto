@@ -1,4 +1,4 @@
-"""params/ 폴더 내 JSON 로드 및 감시."""
+"""Load and watch JSON files in the params/ folder."""
 
 from pathlib import Path
 import json

@@ -1,4 +1,4 @@
-"""트레이딩 상태 저장 및 복구."""
+"""Trading state persistence and recovery."""
 
 import json
 from datetime import datetime, timezone
@@ -10,21 +10,21 @@ from src.trading.strategy import PositionState
 
 
 class StateManager:
-    """포지션 상태 영속화 관리."""
+    """Position state persistence manager."""
 
     def __init__(self, state_dir: str = "data/state") -> None:
         """
-        StateManager 초기화.
+        Initialize StateManager.
 
         Args:
-            state_dir: 상태 파일 저장 디렉토리
+            state_dir: Directory for state files
         """
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.logger = setup_logger("state_manager", "data/logs/state_manager.log")
 
     def _get_state_path(self, symbol: str) -> Path:
-        """심볼별 상태 파일 경로."""
+        """Return state file path for symbol."""
         safe_symbol = symbol.replace("/", "_")
         return self.state_dir / f"{safe_symbol}_state.json"
 
@@ -36,13 +36,13 @@ class StateManager:
         extra_data: Optional[Dict[str, Any]] = None,
     ) -> None:
         """
-        심볼 상태 저장.
+        Save symbol state.
 
         Args:
-            symbol: 심볼
-            long_state: Long 포지션 상태
-            short_state: Short 포지션 상태
-            extra_data: 추가 데이터 (잔고 등)
+            symbol: Symbol
+            long_state: Long position state
+            short_state: Short position state
+            extra_data: Additional data (balance, etc.)
         """
         state = {
             "symbol": symbol,
@@ -62,13 +62,13 @@ class StateManager:
 
     def load_state(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
-        심볼 상태 로드.
+        Load symbol state.
 
         Args:
-            symbol: 심볼
+            symbol: Symbol
 
         Returns:
-            {"long": PositionState, "short": PositionState, "extra": {...}} 또는 None
+            {"long": PositionState, "short": PositionState, "extra": {...}} or None
         """
         path = self._get_state_path(symbol)
 
@@ -92,14 +92,14 @@ class StateManager:
             return None
 
     def delete_state(self, symbol: str) -> None:
-        """심볼 상태 파일 삭제."""
+        """Delete state file for symbol."""
         path = self._get_state_path(symbol)
         if path.exists():
             path.unlink()
             self.logger.info(f"State deleted: {symbol}")
 
     def list_symbols_with_state(self) -> list:
-        """상태 파일이 있는 심볼 목록."""
+        """List symbols that have a state file."""
         symbols = []
         for path in self.state_dir.glob("*_state.json"):
             name = path.stem.replace("_state", "").replace("_", "/")
@@ -108,7 +108,7 @@ class StateManager:
 
 
 class TradeLogger:
-    """거래 이력 로깅."""
+    """Trade history logger."""
 
     def __init__(self, log_dir: str = "data/logs/trades") -> None:
         self.log_dir = Path(log_dir)
@@ -127,13 +127,13 @@ class TradeLogger:
         data: Dict[str, Any],
     ) -> None:
         """
-        거래 이벤트 로깅.
+        Log a trade event.
 
         Args:
-            symbol: 심볼
-            event_type: 이벤트 타입 (ENTRY, DCA, TP, SL 등)
-            side: "long" 또는 "short"
-            data: 추가 데이터
+            symbol: Symbol
+            event_type: Event type (ENTRY, DCA, TP, SL, etc.)
+            side: "long" or "short"
+            data: Additional data
         """
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -155,7 +155,7 @@ class TradeLogger:
         amount: float,
         margin: float,
     ) -> None:
-        """진입 로깅."""
+        """Log entry."""
         self.log_trade(symbol, "ENTRY", side, {
             "price": price,
             "amount": amount,
@@ -172,7 +172,7 @@ class TradeLogger:
         margin: float,
         new_avg: float,
     ) -> None:
-        """DCA 체결 로깅."""
+        """Log DCA fill."""
         self.log_trade(symbol, "DCA", side, {
             "level": level,
             "price": price,
@@ -189,7 +189,7 @@ class TradeLogger:
         amount: float,
         pnl: float,
     ) -> None:
-        """TP 체결 로깅."""
+        """Log TP fill."""
         self.log_trade(symbol, "TP", side, {
             "price": price,
             "amount": amount,
@@ -204,7 +204,7 @@ class TradeLogger:
         amount: float,
         pnl: float,
     ) -> None:
-        """SL 체결 로깅."""
+        """Log SL fill."""
         self.log_trade(symbol, "SL", side, {
             "price": price,
             "amount": amount,

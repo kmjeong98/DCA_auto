@@ -1,4 +1,4 @@
-"""WebSocket 기반 실시간 가격 피드 (binance-futures-connector 기반)."""
+"""Real-time price feed via WebSocket (based on binance-futures-connector)."""
 
 import json
 import threading
@@ -11,7 +11,7 @@ from src.common.logger import setup_logger
 
 
 class PriceFeed:
-    """Binance Futures WebSocket 가격 피드."""
+    """Binance Futures WebSocket price feed."""
 
     MAINNET_WS = "wss://fstream.binance.com"
     TESTNET_WS = "wss://fstream.binancefuture.com"
@@ -35,18 +35,18 @@ class PriceFeed:
         self._ws_client: Optional[UMFuturesWebsocketClient] = None
         self._running = False
 
-        # 심볼 매핑 (BTC/USDT -> btcusdt)
+        # Symbol mapping (BTC/USDT -> btcusdt)
         self._stream_to_symbol: Dict[str, str] = {}
         for symbol in symbols:
             stream_name = symbol.replace("/", "").lower()
             self._stream_to_symbol[stream_name] = symbol
 
     def _on_message(self, _, message: str) -> None:
-        """WebSocket 메시지 처리."""
+        """Handle WebSocket message."""
         try:
             data = json.loads(message)
 
-            # combined stream 형식
+            # combined stream format
             if "stream" in data:
                 data = data["data"]
 
@@ -70,7 +70,7 @@ class PriceFeed:
             self.logger.error(f"Message processing error: {e}")
 
     def _on_close(self, _) -> None:
-        """WebSocket 연결 종료 처리."""
+        """Handle WebSocket connection close."""
         self.logger.warning("WebSocket closed")
         if self._running:
             self.logger.info("Reconnecting in 5s...")
@@ -78,15 +78,15 @@ class PriceFeed:
             self._connect()
 
     def _on_error(self, _, error) -> None:
-        """WebSocket 에러 처리."""
+        """Handle WebSocket error."""
         self.logger.error(f"WebSocket error: {error}")
 
     def _on_open(self, _) -> None:
-        """WebSocket 연결 성공."""
+        """WebSocket connection established."""
         self.logger.info(f"WebSocket connected, symbols: {self.symbols}")
 
     def _connect(self) -> None:
-        """WebSocket 연결 및 구독 (Combined Stream — 단일 연결)."""
+        """Connect and subscribe via WebSocket (Combined Stream — single connection)."""
         self._ws_client = UMFuturesWebsocketClient(
             stream_url=self.ws_url,
             on_message=self._on_message,
@@ -103,7 +103,7 @@ class PriceFeed:
         self.logger.info(f"Subscribed to {len(self.symbols)} mark price streams (combined)")
 
     def start(self) -> None:
-        """WebSocket 시작."""
+        """Start WebSocket."""
         if self._running:
             return
 
@@ -111,32 +111,32 @@ class PriceFeed:
         self._connect()
         self.logger.info("PriceFeed started")
 
-        # 연결 대기
+        # Wait for connection
         time.sleep(2)
 
     def stop(self) -> None:
-        """WebSocket 종료."""
+        """Stop WebSocket."""
         self._running = False
         if self._ws_client:
             self._ws_client.stop()
         self.logger.info("PriceFeed stopped")
 
     def get_price(self, symbol: str) -> Optional[float]:
-        """현재 가격 조회 (캐시)."""
+        """Get current price (cached)."""
         with self._lock:
             return self._prices.get(symbol)
 
     def get_all_prices(self) -> Dict[str, float]:
-        """모든 심볼의 현재 가격."""
+        """Get current prices for all symbols."""
         with self._lock:
             return self._prices.copy()
 
     def is_connected(self) -> bool:
-        """연결 상태 확인."""
+        """Check connection status."""
         return self._ws_client is not None and self._running
 
     def add_symbol(self, symbol: str) -> None:
-        """심볼 추가 (재연결 필요)."""
+        """Add symbol (requires reconnection)."""
         if symbol not in self.symbols:
             stream_name = symbol.replace("/", "").lower()
             self.symbols.append(symbol)
@@ -149,7 +149,7 @@ class PriceFeed:
 
 
 class OrderUpdateFeed:
-    """사용자 데이터 스트림 (주문/포지션 업데이트)."""
+    """User data stream (order/position updates)."""
 
     MAINNET_WS = "wss://fstream.binance.com"
     TESTNET_WS = "wss://fstream.binancefuture.com"
@@ -173,7 +173,7 @@ class OrderUpdateFeed:
         self._running = False
 
     def _on_message(self, _, message: str) -> None:
-        """메시지 처리."""
+        """Handle message."""
         try:
             data = json.loads(message)
             event_type = data.get("e")
