@@ -82,6 +82,9 @@ class APIClient:
         except ClientError as e:
             if "No need to change position side" in str(e.error_message):
                 return {"info": "already_set"}
+            if e.error_code == -4067:
+                # 열린 주문이 있어 변경 불가 — 이미 설정된 것으로 간주
+                return {"info": "already_set"}
             raise
 
     def get_balance(self) -> float:
