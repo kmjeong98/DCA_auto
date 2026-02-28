@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -42,6 +42,80 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
             return json.load(f)
     except Exception:
         return None
+
+
+SNAPSHOT_DIR = Path("data/balance_snapshots")
+SNAPSHOT_INTERVAL = 600  # 10 minutes
+
+
+def _append_snapshot(value: float) -> None:
+    """Append a balance snapshot record to the monthly JSONL file."""
+    SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(timezone.utc)
+    filename = f"balance_{now.strftime('%Y%m')}.jsonl"
+    record = json.dumps({"t": now.isoformat(), "v": round(value, 4)})
+    with (SNAPSHOT_DIR / filename).open("a", encoding="utf-8") as f:
+        f.write(record + "\n")
+
+
+def _load_snapshots(since: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Load balance snapshots from JSONL files.
+
+    If since is given, only returns records with timestamp >= since.
+    Reads current month and previous month files to cover 24h boundary.
+    """
+    results: List[Dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+    months_to_check = {now.strftime("%Y%m")}
+    if since:
+        months_to_check.add(since.strftime("%Y%m"))
+
+    for ym in sorted(months_to_check):
+        fpath = SNAPSHOT_DIR / f"balance_{ym}.jsonl"
+        if not fpath.exists():
+            continue
+        try:
+            with fpath.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        ts = datetime.fromisoformat(rec["t"])
+                        if since and ts < since:
+                            continue
+                        results.append(rec)
+                    except Exception:
+                        continue
+        except Exception:
+            continue
+    return results
+
+
+def _calc_pnl_from_snapshots(current: Optional[float]) -> Dict[str, Optional[float]]:
+    """Calculate 24h and monthly PnL from balance snapshots."""
+    result: Dict[str, Optional[float]] = {"pnl_24h": None, "pnl_monthly": None}
+    if current is None:
+        return result
+
+    now = datetime.now(timezone.utc)
+
+    # 24h PnL: find the oldest snapshot within 24h window
+    since_24h = now - timedelta(hours=24)
+    snapshots_24h = _load_snapshots(since=since_24h)
+    if snapshots_24h:
+        oldest_val = snapshots_24h[0]["v"]
+        result["pnl_24h"] = current - oldest_val
+
+    # Monthly PnL: find the first snapshot of the current month
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    snapshots_month = _load_snapshots(since=month_start)
+    if snapshots_month:
+        first_val = snapshots_month[0]["v"]
+        result["pnl_monthly"] = current - first_val
+
+    return result
 
 
 def build_snapshots(config_path: str) -> tuple:
@@ -160,19 +234,35 @@ def _snapshot_to_dict(snap: SymbolSnapshot) -> Dict[str, Any]:
 
 
 def _fetch_wallet_info(api: APIClient) -> Dict[str, Any]:
-    """Fetch Futures wallet info: USDT, BNB balances + unrealized PnL."""
+    """Fetch Futures wallet info: USDT, BNB balances + unrealized PnL.
+
+    Uses totalWalletBalance (excluding unrealized PnL) as the base wallet value,
+    and fetches per-position unrealized PnL from /fapi/v2/positionRisk.
+    """
     info: Dict[str, Any] = {
         "usdt_balance": None,
         "bnb_balance": None,
         "bnb_value_usd": None,
         "unrealized_pnl": None,
-        "total_wallet_value": None,
+        "wallet_balance": None,
+        "total_equity": None,
+        "position_pnl": {},  # {(symbol, side): pnl}
     }
     try:
         account = api.client.account()
+        info["wallet_balance"] = float(account.get("totalWalletBalance", 0))
         info["unrealized_pnl"] = float(account.get("totalUnrealizedProfit", 0))
-        total_margin = float(account.get("totalMarginBalance", 0))
-        info["total_wallet_value"] = total_margin
+        info["total_equity"] = float(account.get("totalMarginBalance", 0))
+    except Exception:
+        pass
+
+    # Per-position unrealized PnL from positionRisk
+    try:
+        positions = api.get_positions()
+        for p in positions:
+            sym = p["symbol"]  # e.g. "ETHUSDT"
+            side = p["side"]   # "long" or "short"
+            info["position_pnl"][(sym, side)] = p["unrealizedPnl"]
     except Exception:
         pass
 
@@ -208,6 +298,8 @@ def _data_loop(
     """Periodically collect data in background."""
     global _shared_data
 
+    last_snapshot_time = 0.0  # force immediate first snapshot
+
     while True:
         # Uptime
         elapsed = int(time.time() - start_time)
@@ -219,16 +311,37 @@ def _data_loop(
         snapshots, error = build_snapshots(config_path)
 
         wallet = {"usdt_balance": None, "bnb_balance": None, "bnb_value_usd": None,
-                  "unrealized_pnl": None, "total_wallet_value": None}
+                  "unrealized_pnl": None, "wallet_balance": None, "total_equity": None,
+                  "position_pnl": {}}
         equity = None
         if not error:
             try:
                 wallet = _fetch_wallet_info(api)
-                equity = wallet["total_wallet_value"]
+                equity = wallet["total_equity"]
             except Exception:
                 pass
 
-        snap_dicts = [_snapshot_to_dict(sn) for sn in snapshots]
+        # Periodic balance snapshot (every 10 min)
+        now_ts = time.time()
+        if equity is not None and (now_ts - last_snapshot_time) >= SNAPSHOT_INTERVAL:
+            try:
+                _append_snapshot(equity)
+                last_snapshot_time = now_ts
+            except Exception:
+                pass
+
+        # Calculate 24h / monthly PnL from snapshots
+        pnl_data = _calc_pnl_from_snapshots(equity)
+
+        # Inject per-position unrealized PnL into snapshot dicts
+        pos_pnl = wallet.get("position_pnl", {})
+        snap_dicts = []
+        for sn in snapshots:
+            d = _snapshot_to_dict(sn)
+            binance_sym = sn.symbol.replace("/", "")  # "ETH/USDT" -> "ETHUSDT"
+            d["long"]["pnl"] = pos_pnl.get((binance_sym, "long"))
+            d["short"]["pnl"] = pos_pnl.get((binance_sym, "short"))
+            snap_dicts.append(d)
 
         now_str = datetime.now().strftime("%H:%M:%S")
 
@@ -269,6 +382,10 @@ def _data_loop(
                 "active_count": active_count,
                 "total_positions": total_positions,
                 "error": error,
+                "pnl_24h": pnl_data["pnl_24h"],
+                "pnl_24h_fmt": _fmt_pnl(pnl_data["pnl_24h"]),
+                "pnl_monthly": pnl_data["pnl_monthly"],
+                "pnl_monthly_fmt": _fmt_pnl(pnl_data["pnl_monthly"]),
                 "wallet": {
                     "usdt_balance": wallet["usdt_balance"],
                     "usdt_balance_fmt": _fmt_usd(wallet["usdt_balance"]),
@@ -278,8 +395,10 @@ def _data_loop(
                     "bnb_value_usd_fmt": _fmt_usd(wallet["bnb_value_usd"]),
                     "unrealized_pnl": wallet["unrealized_pnl"],
                     "unrealized_pnl_fmt": _fmt_pnl(wallet["unrealized_pnl"]),
-                    "total_wallet_value": wallet["total_wallet_value"],
-                    "total_wallet_value_fmt": _fmt_usd(wallet["total_wallet_value"]),
+                    "wallet_balance": wallet["wallet_balance"],
+                    "wallet_balance_fmt": _fmt_usd(wallet["wallet_balance"]),
+                    "total_equity": wallet["total_equity"],
+                    "total_equity_fmt": _fmt_usd(wallet["total_equity"]),
                 },
             }
 
@@ -306,7 +425,7 @@ body{background:#0d1117;color:#c9d1d9;font-family:'JetBrains Mono','Fira Code','
 .badge-testnet{background:#1f2d1f;color:#3fb950;border:1px solid #238636}
 .badge-mainnet{background:#2d1f1f;color:#f85149;border:1px solid #da3633}
 
-.wallet-bar{display:grid;grid-template-columns:repeat(5,1fr);gap:16px;margin-top:14px;padding-top:14px;border-top:1px solid #30363d}
+.wallet-bar{display:grid;grid-template-columns:repeat(6,1fr);gap:16px;margin-top:14px;padding-top:14px;border-top:1px solid #30363d}
 .wallet-item{display:flex;flex-direction:column;gap:2px}
 .wallet-label{font-size:13px;color:#8b949e}
 .wallet-value{font-size:18px;font-weight:700;color:#e6edf3}
@@ -329,11 +448,14 @@ body{background:#0d1117;color:#c9d1d9;font-family:'JetBrains Mono','Fira Code','
 .card-capital{font-size:14px;color:#8b949e}
 
 .card-body{padding:4px 0}
-.side-row{display:flex;align-items:center;padding:10px 18px;border-bottom:1px solid #21262d;gap:12px}
+.side-row{display:flex;align-items:flex-start;padding:10px 18px;border-bottom:1px solid #21262d;gap:12px}
 .side-row:last-child{border-bottom:none}
-.side-label{font-weight:700;font-size:15px;width:80px;flex-shrink:0}
-.side-long .side-label{color:#3fb950}
-.side-short .side-label{color:#f85149}
+.side-label{font-weight:700;font-size:15px;width:80px;flex-shrink:0;display:flex;flex-direction:column;gap:2px}
+.side-long .side-label{color:#8b949e}
+.side-short .side-label{color:#8b949e}
+.side-pnl{font-size:13px;font-weight:700}
+.side-pnl.pnl-pos{color:#3fb950}
+.side-pnl.pnl-neg{color:#f85149}
 .side-detail{font-size:15px;color:#c9d1d9;flex:1}
 .side-detail .dim{color:#8b949e}
 .side-detail .tag{font-size:13px;color:#8b949e;margin-left:8px}
@@ -362,21 +484,24 @@ body{background:#0d1117;color:#c9d1d9;font-family:'JetBrains Mono','Fira Code','
     </div>
     <div class="wallet-bar">
       <div class="wallet-item">
-        <span class="wallet-label">Total Value</span>
-        <span class="wallet-value" id="wallet-total">$---</span>
+        <span class="wallet-label">Total Equity</span>
+        <span class="wallet-value" id="wallet-equity">$---</span>
       </div>
       <div class="wallet-item">
-        <span class="wallet-label">USDT</span>
-        <span class="wallet-value" id="wallet-usdt">$---</span>
-      </div>
-      <div class="wallet-item">
-        <span class="wallet-label">BNB</span>
-        <span class="wallet-value" id="wallet-bnb">---</span>
-        <span class="wallet-sub" id="wallet-bnb-usd">$---</span>
+        <span class="wallet-label">Wallet Balance</span>
+        <span class="wallet-value" id="wallet-balance">$---</span>
       </div>
       <div class="wallet-item">
         <span class="wallet-label">Unrealized PnL</span>
         <span class="wallet-value" id="wallet-pnl">$---</span>
+      </div>
+      <div class="wallet-item">
+        <span class="wallet-label">24h PnL</span>
+        <span class="wallet-value" id="pnl-24h">$---</span>
+      </div>
+      <div class="wallet-item">
+        <span class="wallet-label">Monthly PnL</span>
+        <span class="wallet-value" id="pnl-monthly">$---</span>
       </div>
       <div class="wallet-item">
         <span class="wallet-label">Allocated</span>
@@ -399,11 +524,23 @@ body{background:#0d1117;color:#c9d1d9;font-family:'JetBrains Mono','Fira Code','
 </div>
 
 <script>
+function fmtSidePnl(v) {
+  if (v == null) return '';
+  const sign = v >= 0 ? '+' : '';
+  const cls = v >= 0 ? 'pnl-pos' : 'pnl-neg';
+  return `<span class="side-pnl ${cls}">${sign}$${v.toFixed(2)}</span>`;
+}
+
+function renderLabel(name, side) {
+  let pnl = side.active && side.pnl != null ? fmtSidePnl(side.pnl) : '';
+  return `<span>${name}</span>${pnl}`;
+}
+
 function renderSide(side) {
   if (side.active) {
     let tp = side.tp_price_fmt ? `<span class="tag">TP ${side.tp_price_fmt}</span>` : '';
-    return `<span>${side.amount.toFixed(4)} @ ${side.avg_price_fmt}</span>` +
-           `<span class="tag">DCA ${side.dca_count}/${side.max_dca}</span>${tp}`;
+    return `<span class="dim">Qty</span> ${side.amount.toFixed(4)} <span class="dim">Avg</span> ${side.avg_price_fmt}` +
+           `<br><span class="tag">DCA ${side.dca_count}/${side.max_dca}</span>${tp}`;
   }
   if (side.cooldown) {
     return `<span class="cooldown">Cooldown ${side.cooldown}</span>`;
@@ -424,14 +561,20 @@ function render(d) {
 
   // Wallet
   const w = d.wallet || {};
-  document.getElementById('wallet-total').textContent = w.total_wallet_value_fmt || '$---';
-  document.getElementById('wallet-usdt').textContent = w.usdt_balance_fmt || '$---';
-  document.getElementById('wallet-bnb').textContent = w.bnb_balance_fmt || '---';
-  document.getElementById('wallet-bnb-usd').textContent = w.bnb_value_usd_fmt ? '≈ ' + w.bnb_value_usd_fmt : '';
+  document.getElementById('wallet-equity').textContent = w.total_equity_fmt || '$---';
+  document.getElementById('wallet-balance').textContent = w.wallet_balance_fmt || '$---';
 
   const pnlEl = document.getElementById('wallet-pnl');
   pnlEl.textContent = w.unrealized_pnl_fmt || '$---';
   pnlEl.className = 'wallet-value' + (w.unrealized_pnl != null ? (w.unrealized_pnl >= 0 ? ' pnl-pos' : ' pnl-neg') : '');
+
+  const pnl24hEl = document.getElementById('pnl-24h');
+  pnl24hEl.textContent = d.pnl_24h_fmt || '$---';
+  pnl24hEl.className = 'wallet-value' + (d.pnl_24h != null ? (d.pnl_24h >= 0 ? ' pnl-pos' : ' pnl-neg') : '');
+
+  const pnlMonthEl = document.getElementById('pnl-monthly');
+  pnlMonthEl.textContent = d.pnl_monthly_fmt || '$---';
+  pnlMonthEl.className = 'wallet-value' + (d.pnl_monthly != null ? (d.pnl_monthly >= 0 ? ' pnl-pos' : ' pnl-neg') : '');
 
   document.getElementById('total-capital').textContent = d.total_capital_fmt;
   document.getElementById('uptime').textContent = d.uptime;
@@ -457,11 +600,11 @@ function render(d) {
       </div>
       <div class="card-body">
         <div class="side-row side-long">
-          <span class="side-label">LONG ▲</span>
+          <span class="side-label">${renderLabel('LONG ▲', snap.long)}</span>
           <span class="side-detail">${renderSide(snap.long)}</span>
         </div>
         <div class="side-row side-short">
-          <span class="side-label">SHORT ▼</span>
+          <span class="side-label">${renderLabel('SHORT ▼', snap.short)}</span>
           <span class="side-detail">${renderSide(snap.short)}</span>
         </div>
       </div>

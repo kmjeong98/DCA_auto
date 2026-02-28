@@ -16,5 +16,12 @@ module.exports = {
       autorestart: false,
       watch: false,
     },
+    {
+      name: "dca-monitor",
+      script: "main_web_monitor.py",
+      interpreter: ".venv/bin/python3",
+      args: "--mainnet --no-open",
+      cwd: __dirname,
+    },
   ],
 };
