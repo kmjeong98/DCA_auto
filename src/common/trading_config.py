@@ -72,13 +72,18 @@ class TradingConfig:
         if not self.symbols:
             raise ValueError("No symbols configured")
 
-        # Check that params files exist
+        # Check that params files exist (with USDT fallback for non-USDT pairs)
+        from src.common.config_loader import _usdt_fallback
+
         params_dir = Path("data/params")
         missing = []
         for safe_name in self.symbols:
             param_file = params_dir / f"{safe_name}.json"
             if not param_file.exists():
-                missing.append(safe_name)
+                fallback = _usdt_fallback(safe_name)
+                fallback_file = params_dir / f"{fallback}.json" if fallback else None
+                if not (fallback_file and fallback_file.exists()):
+                    missing.append(safe_name)
 
         if missing:
             raise FileNotFoundError(

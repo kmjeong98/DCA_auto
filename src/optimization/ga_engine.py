@@ -65,7 +65,7 @@ def trades_per_month(tf: str, base_tf: str = "1m", base_trades: int = 10) -> flo
 class SimulationConfig:
     """Simulation constant settings."""
     timeframe: str = "1m"
-    data_years: int = 5
+    data_years: float = 5
     start_date_str: Optional[str] = None
 
     initial_capital: float = 1000.0
@@ -78,7 +78,7 @@ class SimulationConfig:
     fixed_leverage: int = 25
 
     cooldown_hours: int = 6
-    sharpe_days: int = 14
+    sharpe_days: int = 3
 
     # Safety constants (OKX-style SL)
     abs_cap_dca: int = 15
@@ -134,8 +134,8 @@ GENOME_SIZE = 12
 
 # Parameter bounds
 PARAM_BOUNDS_HOST = np.array([
-    [0.005, 0.02], [0.01, 0.11], [3, 5], [1.05, 1.7], [1.3, 2.1], [0.005, 0.30],  # Long
-    [0.005, 0.02], [0.01, 0.11], [3, 5], [1.05, 1.7], [1.3, 2.1], [0.005, 0.30],  # Short
+    [0.005, 0.02], [0.01, 0.11], [3, 5], [1.05, 1.7], [1.3, 2.1], [0.005, 0.50],  # Long
+    [0.005, 0.02], [0.01, 0.11], [3, 5], [1.05, 1.7], [1.3, 2.1], [0.005, 0.50],  # Short
 ], dtype=np.float32)
 
 ABSOLUTE_MIN_TRADES = 10.0
@@ -274,6 +274,12 @@ def run_dual_simulation(
     sharpe_sum_r = 0.0
     sharpe_sum_sq = 0.0
     sharpe_cnt = 0
+
+    # Second-half Sharpe tracking
+    mid_bar = n_bars // 2
+    sharpe2_sum_r = 0.0
+    sharpe2_sum_sq = 0.0
+    sharpe2_cnt = 0
 
     start_open = opens[0]
 
@@ -695,10 +701,14 @@ def run_dual_simulation(
         if sharpe_interval > 0 and ((i + 1) % sharpe_interval == 0):
             if sharpe_last_equity > 0:
                 profit_delta = combined - sharpe_last_equity
-                step_ret = profit_delta / initial_capital
+                step_ret = profit_delta / sharpe_last_equity if sharpe_last_equity > 0 else 0.0
                 sharpe_sum_r += step_ret
                 sharpe_sum_sq += (step_ret * step_ret)
                 sharpe_cnt += 1
+                if i >= mid_bar:
+                    sharpe2_sum_r += step_ret
+                    sharpe2_sum_sq += (step_ret * step_ret)
+                    sharpe2_cnt += 1
             sharpe_last_equity = combined
 
     final_equity = balance
@@ -718,6 +728,18 @@ def run_dual_simulation(
         if variance > 0.0000001:
             volatility = math.sqrt(variance)
             sharpe = mean_ret / volatility
+
+    sharpe2 = 0.0
+    if sharpe2_cnt > 1:
+        mean_ret2 = sharpe2_sum_r / sharpe2_cnt
+        variance2 = (sharpe2_sum_sq / sharpe2_cnt) - (mean_ret2 * mean_ret2)
+        if variance2 > 0.0000001:
+            sharpe2 = mean_ret2 / math.sqrt(variance2)
+
+    if sharpe > 0 and sharpe2 > 0:
+        sharpe = math.sqrt(sharpe * sharpe2)
+    else:
+        sharpe = 0.0
 
     return roi, mdd, net_profit, total_trades, final_equity, sharpe
 
@@ -951,13 +973,11 @@ def evaluate_population(
         if num < req:
             pen *= (num / req)
 
-        risk_factor = 1.0 + (mdd / 50.0) ** 2
+        risk_factor = 1.0 + (mdd / 80.0) ** 2
 
-        sharpe_mult = 1.0
-        if sharpe > 0:
-            sharpe_mult = 1.0 + (sharpe * 10.0)
-
-        fit = (1 / risk_factor) * pen * sharpe_mult
+        mpr_factor = math.log(1.0 + mpr) if mpr > 0 else 0.0
+        sharpe_val = max(sharpe, 0.0)
+        fit = (1 / risk_factor) * pen * sharpe_val * mpr_factor
 
         results[idx, 0] = fit
         results[idx, 1] = r
@@ -1119,7 +1139,7 @@ class OptimizationResult:
     # Meta info
     generation: int
     created_at: str  # ISO 8601 format
-    data_years: int
+    data_years: float
 
     def to_dict(self) -> Dict:
         """Convert to dictionary for JSON storage."""
@@ -1371,11 +1391,10 @@ class GAEngine:
         if num < req:
             pen *= (num / req)
 
-        risk_factor = 1.0 + (mdd / 50.0) ** 2
-        sharpe_mult = 1.0
-        if sharpe > 0:
-            sharpe_mult = 1.0 + (sharpe * 10.0)
-        fitness = (1 / risk_factor) * pen * sharpe_mult
+        risk_factor = 1.0 + (mdd / 80.0) ** 2
+        mpr_factor = math.log(1.0 + mpr) if mpr > 0 else 0.0
+        sharpe_val = max(sharpe, 0.0)
+        fitness = (1 / risk_factor) * pen * sharpe_val * mpr_factor
 
         return {'fitness': fitness, 'mpr': mpr, 'mdd': mdd, 'sharpe': sharpe}
 
@@ -1577,6 +1596,8 @@ class GAEngine:
         print(f"[Config] Params will be saved to: {self.params_dir}")
 
         results = {}
+        decision_log_path = self.params_dir.parent / "logs" / "optimization_decisions.jsonl"
+        decision_log_path.parent.mkdir(parents=True, exist_ok=True)
 
         for ticker in tickers:
             result = self.optimize_ticker(ticker)
@@ -1616,14 +1637,79 @@ class GAEngine:
 
                         if result.fitness <= existing_stats['fitness']:
                             print(f"⏭️  {ticker} New parameters are inferior to existing, not saving")
+                            # Update performance metrics in existing params file (keep created_at)
+                            self._update_performance(
+                                existing_path, existing_stats
+                            )
+                            print(f"   📈 Updated performance metrics in {existing_path.name}")
+                            self._log_decision(decision_log_path, ticker, "kept",
+                                               {"fitness": result.fitness, "mpr": result.mpr, "mdd": result.mdd, "sharpe": result.sharpe},
+                                               {"fitness": existing_stats["fitness"], "mpr": existing_stats["mpr"], "mdd": existing_stats["mdd"], "sharpe": existing_stats["sharpe"]},
+                                               result.generation)
                             continue
 
                         print(f"⬆️  {ticker} New parameters are superior → saving")
+                        self._log_decision(decision_log_path, ticker, "updated",
+                                           {"fitness": result.fitness, "mpr": result.mpr, "mdd": result.mdd, "sharpe": result.sharpe},
+                                           {"fitness": existing_stats["fitness"], "mpr": existing_stats["mpr"], "mdd": existing_stats["mdd"], "sharpe": existing_stats["sharpe"]},
+                                           result.generation)
                     except Exception as e:
                         print(f"⚠️ {ticker} Failed to re-evaluate existing parameters: {e} → saving new")
+                        self._log_decision(decision_log_path, ticker, "updated",
+                                           {"fitness": result.fitness, "mpr": result.mpr, "mdd": result.mdd, "sharpe": result.sharpe},
+                                           generation=result.generation)
+                else:
+                    self._log_decision(decision_log_path, ticker, "new",
+                                       {"fitness": result.fitness, "mpr": result.mpr, "mdd": result.mdd, "sharpe": result.sharpe},
+                                       generation=result.generation)
 
                 filepath = self._save_result(result)
                 results[ticker] = result
                 print(f"✅ {ticker} Parameters saved: {filepath}")
 
         return results
+
+    @staticmethod
+    def _update_performance(params_path: Path, stats: dict):
+        """Update only the performance metrics in an existing params file.
+
+        Preserves created_at, parameters, and all other fields.
+        """
+        try:
+            with open(params_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            data["performance"] = {
+                "mpr": round(stats.get("mpr", 0), 4),
+                "mdd": round(stats.get("mdd", 0), 4),
+                "sharpe": round(stats.get("sharpe", 0), 4),
+                "fitness": round(stats.get("fitness", 0), 6),
+            }
+            with open(params_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _log_decision(log_path: Path, symbol: str, decision: str,
+                      new_stats: dict, old_stats: dict = None, generation: int = 0):
+        """Append optimization decision to JSONL log."""
+        record = {
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "symbol": symbol,
+            "decision": decision,
+            "generation": generation,
+            "new_fitness": round(new_stats.get("fitness", 0), 4),
+            "new_mpr": round(new_stats.get("mpr", 0), 2),
+            "new_mdd": round(new_stats.get("mdd", 0), 2),
+            "new_sharpe": round(new_stats.get("sharpe", 0), 3),
+        }
+        if old_stats:
+            record["old_fitness"] = round(old_stats.get("fitness", 0), 4)
+            record["old_mpr"] = round(old_stats.get("mpr", 0), 2)
+            record["old_mdd"] = round(old_stats.get("mdd", 0), 2)
+            record["old_sharpe"] = round(old_stats.get("sharpe", 0), 3)
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception:
+            pass

@@ -45,6 +45,7 @@ class SymbolSnapshot:
         long_dca_count: int,
         long_max_dca: int,
         long_tp_price: float,
+        long_sl_price: float,
         long_last_sl_time: Optional[datetime],
         short_active: bool,
         short_amount: float,
@@ -52,6 +53,7 @@ class SymbolSnapshot:
         short_dca_count: int,
         short_max_dca: int,
         short_tp_price: float,
+        short_sl_price: float,
         short_last_sl_time: Optional[datetime],
         cooldown_hours: int = 6,
     ) -> None:
@@ -65,6 +67,7 @@ class SymbolSnapshot:
         self.long_dca_count = long_dca_count
         self.long_max_dca = long_max_dca
         self.long_tp_price = long_tp_price
+        self.long_sl_price = long_sl_price
         self.long_last_sl_time = long_last_sl_time
 
         self.short_active = short_active
@@ -73,10 +76,13 @@ class SymbolSnapshot:
         self.short_dca_count = short_dca_count
         self.short_max_dca = short_max_dca
         self.short_tp_price = short_tp_price
+        self.short_sl_price = short_sl_price
         self.short_last_sl_time = short_last_sl_time
 
         self.cooldown_hours = cooldown_hours
         self.pending_retries: List[str] = []
+        self.long_dca_prices: List[float] = []
+        self.short_dca_prices: List[float] = []
 
         # Parameter meta/performance info
         self.params_date: str = ""
@@ -106,7 +112,25 @@ class SymbolSnapshot:
             except Exception:
                 pass
 
-        return cls(
+        long_sl = 0.0
+        if trader.long_state.active and trader.long_state.base_price > 0:
+            try:
+                long_sl = strategy.calculate_sl_price(
+                    trader.long_state.base_price, "long"
+                )
+            except Exception:
+                pass
+
+        short_sl = 0.0
+        if trader.short_state.active and trader.short_state.base_price > 0:
+            try:
+                short_sl = strategy.calculate_sl_price(
+                    trader.short_state.base_price, "short"
+                )
+            except Exception:
+                pass
+
+        snap = cls(
             symbol=trader.symbol,
             capital=trader.capital,
             current_price=trader._current_price,
@@ -116,6 +140,7 @@ class SymbolSnapshot:
             long_dca_count=trader.long_state.dca_count,
             long_max_dca=int(strategy.long_params.get("max_dca", 0)),
             long_tp_price=long_tp,
+            long_sl_price=long_sl,
             long_last_sl_time=trader.long_state.last_sl_time,
             short_active=trader.short_state.active,
             short_amount=trader.short_state.amount,
@@ -123,9 +148,13 @@ class SymbolSnapshot:
             short_dca_count=trader.short_state.dca_count,
             short_max_dca=int(strategy.short_params.get("max_dca", 0)),
             short_tp_price=short_tp,
+            short_sl_price=short_sl,
             short_last_sl_time=trader.short_state.last_sl_time,
             cooldown_hours=trader.cooldown_hours,
         )
+        snap.long_dca_prices = [d.trigger_price for d in trader.long_state.dca_orders if d.trigger_price > 0]
+        snap.short_dca_prices = [d.trigger_price for d in trader.short_state.dca_orders if d.trigger_price > 0]
+        return snap
 
     @classmethod
     def from_state_files(
@@ -162,6 +191,19 @@ class SymbolSnapshot:
             tp_ratio = short_params.get("take_profit", 0)
             short_tp = short_avg * (1.0 - tp_ratio)
 
+        # Calculate SL prices (based on base_price)
+        long_base = float(long_data.get("base_price", 0))
+        long_sl = 0.0
+        if long_data.get("active") and long_base > 0:
+            sl_ratio = long_params.get("stop_loss", 0)
+            long_sl = long_base * (1.0 - sl_ratio)
+
+        short_base = float(short_data.get("base_price", 0))
+        short_sl = 0.0
+        if short_data.get("active") and short_base > 0:
+            sl_ratio = short_params.get("stop_loss", 0)
+            short_sl = short_base * (1.0 + sl_ratio)
+
         # Parse last_sl_time
         long_sl_time = None
         if long_data.get("last_sl_time"):
@@ -187,6 +229,7 @@ class SymbolSnapshot:
             long_dca_count=int(long_data.get("dca_count", 0)),
             long_max_dca=long_max_dca,
             long_tp_price=long_tp,
+            long_sl_price=long_sl,
             long_last_sl_time=long_sl_time,
             short_active=bool(short_data.get("active", False)),
             short_amount=float(short_data.get("amount", 0)),
@@ -194,10 +237,13 @@ class SymbolSnapshot:
             short_dca_count=int(short_data.get("dca_count", 0)),
             short_max_dca=short_max_dca,
             short_tp_price=short_tp,
+            short_sl_price=short_sl,
             short_last_sl_time=short_sl_time,
             cooldown_hours=cooldown_hours,
         )
         snap.pending_retries = extra.get("pending_retries", [])
+        snap.long_dca_prices = [float(d.get("trigger_price", 0)) for d in long_data.get("dca_orders", []) if float(d.get("trigger_price", 0)) > 0]
+        snap.short_dca_prices = [float(d.get("trigger_price", 0)) for d in short_data.get("dca_orders", []) if float(d.get("trigger_price", 0)) > 0]
 
         # Parameter meta/performance info
         meta = params_data.get("meta", {})

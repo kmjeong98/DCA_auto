@@ -45,6 +45,7 @@ class SymbolTrader:
         self._params_safe_name = safe_name
         self.cooldown_hours = cooldown_hours
         self._weight_changed = False
+        self._needs_update = False
         self._config_path = config_path
 
         # Initialize strategy
@@ -162,6 +163,7 @@ class SymbolTrader:
                     self.long_state.amount = amount
                     if entry_price > 0:
                         self.long_state.avg_price = entry_price
+                        self.long_state.cost = entry_price * amount
                         if self.long_state.base_price == 0:
                             self.long_state.base_price = entry_price
 
@@ -171,6 +173,7 @@ class SymbolTrader:
                     self.short_state.amount = amount
                     if entry_price > 0:
                         self.short_state.avg_price = entry_price
+                        self.short_state.cost = entry_price * amount
                         if self.short_state.base_price == 0:
                             self.short_state.base_price = entry_price
 
@@ -197,6 +200,49 @@ class SymbolTrader:
 
         except Exception as e:
             self.logger.error(f"Sync error: {e}")
+
+    def periodic_sync(self) -> None:
+        """Periodically check for state/exchange mismatches and fix them.
+
+        Detects cases where local state says a position is active but
+        the exchange has no position (e.g. TP/SL filled while stream was down).
+        Checks TP/SL order status to determine which event occurred.
+        """
+        try:
+            positions = self.api.get_positions(self.symbol)
+            exchange_sides = set()
+            for pos in positions:
+                side = pos.get("side", "").lower()
+                amount = float(pos.get("contracts", 0))
+                if amount > 0:
+                    exchange_sides.add(side)
+
+            for side in ("long", "short"):
+                state = self.long_state if side == "long" else self.short_state
+                if state.active and side not in exchange_sides:
+                    # Check TP order status to distinguish TP vs SL
+                    was_tp = False
+                    if state.tp_order_id:
+                        try:
+                            tp_order = self.api.get_order(self.symbol, state.tp_order_id)
+                            if tp_order.get("status") == "FILLED":
+                                was_tp = True
+                        except Exception:
+                            pass
+
+                    if was_tp:
+                        self.logger.warning(
+                            f"[periodic_sync] {side.upper()} closed by TP — re-entering"
+                        )
+                        self._handle_tp(side)
+                    else:
+                        self.logger.warning(
+                            f"[periodic_sync] {side.upper()} closed by SL — cooldown"
+                        )
+                        self._handle_sl(side)
+
+        except Exception as e:
+            self.logger.error(f"Periodic sync error: {e}")
 
     def _is_opening_order(self, order: Dict[str, Any], side: str) -> bool:
         """Determine if an order is a position-increasing (DCA) order.
@@ -329,6 +375,24 @@ class SymbolTrader:
                 except Exception as e:
                     self.logger.error(f"Cancel orphaned order error: {e}")
 
+        # ── Step 2b: Cancel orphaned algo orders (duplicate SL) ──
+        tracked_algo_ids: set = set()
+        for side in ["long", "short"]:
+            state = self.long_state if side == "long" else self.short_state
+            if state.sl_order_id:
+                tracked_algo_ids.add(state.sl_order_id)
+        try:
+            for ao in algo_orders:
+                ao_id = str(ao["id"])
+                if ao_id not in tracked_algo_ids:
+                    self.logger.warning(f"Cancelling orphaned algo order {ao_id}")
+                    try:
+                        self.api.cancel_algo_order(self.symbol, ao_id)
+                    except Exception as e:
+                        self.logger.error(f"Cancel orphaned algo order error: {e}")
+        except Exception:
+            pass
+
         # ── Step 3: Re-place SL/TP for active positions + correct dca_count ──
         for side in ["long", "short"]:
             state = self.long_state if side == "long" else self.short_state
@@ -407,16 +471,22 @@ class SymbolTrader:
             self.logger.warning(f"Config weight reload failed: {e}")
 
     def _try_update_margin(self) -> None:
-        """Attempt margin update when both sides are inactive."""
-        if self.long_state.active or self.short_state.active:
-            return  # Skip if either side is active
+        """Attempt margin + params update.
+
+        Normally skipped if either side is active.
+        When _needs_update is set (by TP/SL), bypasses the active guard
+        and forces the update regardless of position state.
+        """
+        if not self._needs_update:
+            if self.long_state.active or self.short_state.active:
+                return
 
         # Apply latest weight from config
         self._reload_weight_from_config()
 
         try:
             new_balance = self.api.get_account_equity()
-            force = self._weight_changed
+            force = self._weight_changed or self._needs_update
             self.capital = self.margin_manager.try_update(
                 self.symbol, self.weight, self.capital, new_balance, force=force
             )
@@ -426,6 +496,7 @@ class SymbolTrader:
 
         # Also attempt parameter update
         self._try_update_params()
+        self._needs_update = False
 
     @staticmethod
     def _trading_params(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -546,9 +617,9 @@ class SymbolTrader:
             if state.sl_order_id:
                 try:
                     self.api.cancel_algo_order(self.symbol, state.sl_order_id)
-                except Exception:
-                    pass
-                state.sl_order_id = None
+                    state.sl_order_id = None
+                except Exception as e:
+                    self.logger.warning(f"Failed to cancel old SL {state.sl_order_id}: {e}")
 
             # Re-place with new parameters
             self._place_sl_order(side)
@@ -640,7 +711,7 @@ class SymbolTrader:
             # Update state
             state.active = True
             state.amount = filled_amount
-            state.cost = margin
+            state.cost = fill_price * filled_amount  # notional cost
             state.avg_price = fill_price
             state.base_price = fill_price
             state.dca_count = 0
@@ -727,9 +798,10 @@ class SymbolTrader:
 
             position_side = "LONG" if side == "long" else "SHORT"
             order_side = "sell" if side == "long" else "buy"
+            amount = self.api.round_amount(self.symbol, state.amount)
 
             order = self.api.place_stop_loss(
-                self.symbol, order_side, state.amount, sl_price, position_side,
+                self.symbol, order_side, amount, sl_price, position_side,
             )
 
             state.sl_order_id = str(order.get("id"))
@@ -737,7 +809,7 @@ class SymbolTrader:
 
             self.logger.info(
                 f"SL {side.upper()} placed - Price: {sl_price:.2f}, "
-                f"Amount: {state.amount:.4f}"
+                f"Amount: {amount:.4f}"
             )
 
         except Exception as e:
@@ -821,9 +893,10 @@ class SymbolTrader:
 
             position_side = "LONG" if side == "long" else "SHORT"
             order_side = "sell" if side == "long" else "buy"
+            amount = self.api.round_amount(self.symbol, state.amount)
 
             order = self.api.place_take_profit(
-                self.symbol, order_side, state.amount, tp_price, position_side,
+                self.symbol, order_side, amount, tp_price, position_side,
             )
 
             state.tp_order_id = str(order.get("id"))
@@ -831,7 +904,7 @@ class SymbolTrader:
 
             self.logger.info(
                 f"TP {side.upper()} placed - Price: {tp_price:.2f}, "
-                f"Amount: {state.amount:.4f}"
+                f"Amount: {amount:.4f}"
             )
 
         except Exception as e:
@@ -885,26 +958,6 @@ class SymbolTrader:
             except Exception:
                 pass
 
-    def _try_update_margin_with_equity(self, equity: float) -> None:
-        """Update margin using externally provided equity (avoids duplicate REST calls)."""
-        if self.long_state.active or self.short_state.active:
-            return
-        if equity <= 0:
-            return
-
-        # Apply latest weight from config
-        self._reload_weight_from_config()
-
-        try:
-            force = self._weight_changed
-            self.capital = self.margin_manager.try_update(
-                self.symbol, self.weight, self.capital, equity, force=force
-            )
-            self._weight_changed = False
-        except Exception as e:
-            self.logger.error(f"Margin update error: {e}")
-        self._try_update_params()
-
     def _handle_tp(self, side: str) -> None:
         """Handle TP fill — re-entry first, cleanup after."""
         state = self.long_state if side == "long" else self.short_state
@@ -938,8 +991,8 @@ class SymbolTrader:
             self.symbol, side, self._current_price, old_amount, pnl
         )
 
-        # ── ④ Update margin (reuse equity, avoid duplicate calls) ──
-        self._try_update_margin_with_equity(new_equity)
+        # ── ④ Defer margin + params update to 5-min cycle ──
+        self._needs_update = True
 
         self._save_state()
 
@@ -987,8 +1040,8 @@ class SymbolTrader:
         state.reset()
         state.last_sl_time = datetime.now(timezone.utc)
 
-        # Update margin (reuse equity)
-        self._try_update_margin_with_equity(new_equity)
+        # Defer margin + params update to 5-min cycle
+        self._needs_update = True
 
         self._save_state()
 
@@ -1029,9 +1082,10 @@ class SymbolTrader:
         leverage = self.strategy.get_leverage(side)
         add_notional = dca.margin * leverage
         add_amount = add_notional / dca.trigger_price
+        add_amount = self.api.round_amount(self.symbol, add_amount)
 
         new_amount, new_cost, new_avg = self.strategy.calculate_avg_price(
-            state.amount, state.cost, add_amount, dca.margin, side
+            state.amount, state.cost, add_amount, dca.trigger_price * add_amount,
         )
 
         state.amount = new_amount
@@ -1053,18 +1107,18 @@ class SymbolTrader:
         if state.sl_order_id:
             try:
                 self.api.cancel_algo_order(self.symbol, state.sl_order_id)
-            except Exception:
-                pass
-            state.sl_order_id = None
+                state.sl_order_id = None
+            except Exception as e:
+                self.logger.warning(f"Failed to cancel old SL {state.sl_order_id}: {e}")
         self._place_sl_order(side)
 
         # Cancel TP → re-place (new avg_price, increased amount)
         if state.tp_order_id:
             try:
                 self.api.cancel_order(self.symbol, state.tp_order_id)
-            except Exception:
-                pass
-            state.tp_order_id = None
+                state.tp_order_id = None
+            except Exception as e:
+                self.logger.warning(f"Failed to cancel old TP {state.tp_order_id}: {e}")
         self._place_tp_order(side)
 
     def on_order_filled(self, order_id: str, data: Dict[str, Any]) -> None:
@@ -1515,6 +1569,15 @@ class TradingExecutor:
             if not self.traders:
                 raise RuntimeError("No traders initialized")
 
+            # Log symbol trading specs
+            self.logger.info("=== Symbol Trading Specs ===")
+            for symbol in self.traders:
+                specs = self.api.get_symbol_specs(symbol)
+                self.logger.info(
+                    f"  {symbol}: stepSize={specs['stepSize']}, "
+                    f"tickSize={specs['tickSize']}, minQty={specs['minQty']}"
+                )
+
             # Start price feed
             self.price_feed = PriceFeed(
                 symbols=list(self.traders.keys()),
@@ -1562,14 +1625,16 @@ class TradingExecutor:
                     if self._pending_removals:
                         self._process_pending_removals()
 
-                    # Every 5 minutes: detect config changes + DCA polling backup + hot param update
+                    # Every 5 minutes: detect config changes + DCA polling backup + hot param update + sync
                     if poll_counter % 5 == 0:
                         self._check_config_update()
 
                         for trader in self.traders.values():
+                            trader._try_update_margin()
                             trader._check_and_handle_dca_fills("long")
                             trader._check_and_handle_dca_fills("short")
                             trader._try_hot_update_params()
+                            trader.periodic_sync()
 
                     # Every 10 minutes: check and refill BNB balance
                     if poll_counter % 10 == 0:

@@ -345,6 +345,17 @@ class APIClient:
         step_size = float(filters.get("LOT_SIZE", {}).get("stepSize", "0.001"))
         return self._round_step(amount, step_size)
 
+    def get_symbol_specs(self, symbol: str) -> Dict[str, Any]:
+        """Return trading specs (stepSize, tickSize, minQty) for a symbol."""
+        filters = self._get_filters(symbol)
+        lot = filters.get("LOT_SIZE", {})
+        price = filters.get("PRICE_FILTER", {})
+        return {
+            "stepSize": float(lot.get("stepSize", 0.001)),
+            "minQty": float(lot.get("minQty", 0.001)),
+            "tickSize": float(price.get("tickSize", 0.01)),
+        }
+
     def get_account_equity(self) -> float:
         """Fetch totalMarginBalance (actual equity including unrealized PnL)."""
         account = self.client.account()

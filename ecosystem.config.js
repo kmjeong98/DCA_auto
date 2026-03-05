@@ -17,11 +17,13 @@ module.exports = {
       watch: false,
     },
     {
-      name: "dca-monitor",
-      script: "main_web_monitor.py",
+      name: "dca-report",
+      script: "main_daily_report.py",
       interpreter: ".venv/bin/python3",
-      args: "--mainnet --no-open",
       cwd: __dirname,
+      cron_restart: "0 0 * * *", // daily at 00:00 UTC = 09:00 KST
+      autorestart: false,
+      watch: false,
     },
   ],
 };

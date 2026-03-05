@@ -176,7 +176,7 @@ class DataManager:
     def fetch_data(
         symbol: str,
         timeframe: str = "15m",
-        years: int = 4,
+        years: float = 4,
         start_date_str: Optional[str] = None,
         end_date_str: Optional[str] = None,
         force_refresh: bool = False,

@@ -20,7 +20,7 @@ class PositionState:
     side: str  # "long" or "short"
     active: bool = False  # whether position is active
     amount: float = 0.0  # held quantity (contracts)
-    cost: float = 0.0  # total margin invested
+    cost: float = 0.0  # total notional cost (price × amount)
     avg_price: float = 0.0  # average entry price
     base_price: float = 0.0  # initial entry price (DCA/SL reference)
     dca_count: int = 0  # number of DCA fills executed
@@ -264,27 +264,23 @@ class DCAStrategy:
         current_amount: float,
         current_cost: float,
         add_amount: float,
-        add_margin: float,
-        side: str,
+        add_notional: float,
     ) -> Tuple[float, float, float]:
         """
         Calculate new average price after DCA.
 
         Args:
             current_amount: Current held quantity
-            current_cost: Current margin invested
+            current_cost: Current notional cost (price × amount)
             add_amount: Additional quantity
-            add_margin: Additional margin
-            side: "long" or "short"
+            add_notional: Additional notional (dca_price × add_amount)
 
         Returns:
             (new_amount, new_cost, new_avg_price)
         """
-        leverage = self.get_leverage(side)
-
         new_amount = current_amount + add_amount
-        new_cost = current_cost + add_margin
-        new_avg = (new_cost * leverage) / new_amount
+        new_cost = current_cost + add_notional
+        new_avg = new_cost / new_amount if new_amount > 0 else 0.0
 
         return new_amount, new_cost, new_avg
 
