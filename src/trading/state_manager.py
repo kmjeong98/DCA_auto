@@ -114,10 +114,11 @@ class TradeLogger:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
-    def _get_log_path(self, symbol: str) -> Path:
+    def _get_log_path(self, symbol: str, dt: Optional[datetime] = None) -> Path:
+        """Return log path. When dt is None, uses current UTC month."""
         safe_symbol = symbol.replace("/", "_")
-        date_str = datetime.now().strftime("%Y%m")
-        return self.log_dir / f"{safe_symbol}_{date_str}.jsonl"
+        month = (dt or datetime.now(timezone.utc)).strftime("%Y%m")
+        return self.log_dir / f"{safe_symbol}_{month}.jsonl"
 
     def log_trade(
         self,
@@ -125,6 +126,7 @@ class TradeLogger:
         event_type: str,
         side: str,
         data: Dict[str, Any],
+        timestamp: Optional[datetime] = None,
     ) -> None:
         """
         Log a trade event.
@@ -134,16 +136,20 @@ class TradeLogger:
             event_type: Event type (ENTRY, DCA, TP, SL, etc.)
             side: "long" or "short"
             data: Additional data
+            timestamp: Optional override for the event time. When provided, the
+                JSONL record is written to the month file matching that time
+                (used for offline-recovery reconstruction).
         """
+        ts = timestamp or datetime.now(timezone.utc)
         record = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": ts.isoformat(),
             "symbol": symbol,
             "event": event_type,
             "side": side,
             **data,
         }
 
-        path = self._get_log_path(symbol)
+        path = self._get_log_path(symbol, ts)
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -154,13 +160,18 @@ class TradeLogger:
         price: float,
         amount: float,
         margin: float,
+        order_id: Optional[str] = None,
+        timestamp: Optional[datetime] = None,
     ) -> None:
         """Log entry."""
-        self.log_trade(symbol, "ENTRY", side, {
+        data: Dict[str, Any] = {
             "price": price,
             "amount": amount,
             "margin": margin,
-        })
+        }
+        if order_id is not None:
+            data["order_id"] = order_id
+        self.log_trade(symbol, "ENTRY", side, data, timestamp=timestamp)
 
     def log_dca(
         self,
@@ -171,15 +182,20 @@ class TradeLogger:
         amount: float,
         margin: float,
         new_avg: float,
+        order_id: Optional[str] = None,
+        timestamp: Optional[datetime] = None,
     ) -> None:
         """Log DCA fill."""
-        self.log_trade(symbol, "DCA", side, {
+        data: Dict[str, Any] = {
             "level": level,
             "price": price,
             "amount": amount,
             "margin": margin,
             "new_avg_price": new_avg,
-        })
+        }
+        if order_id is not None:
+            data["order_id"] = order_id
+        self.log_trade(symbol, "DCA", side, data, timestamp=timestamp)
 
     def log_tp(
         self,
@@ -188,13 +204,18 @@ class TradeLogger:
         price: float,
         amount: float,
         pnl: float,
+        order_id: Optional[str] = None,
+        timestamp: Optional[datetime] = None,
     ) -> None:
         """Log TP fill."""
-        self.log_trade(symbol, "TP", side, {
+        data: Dict[str, Any] = {
             "price": price,
             "amount": amount,
             "pnl": pnl,
-        })
+        }
+        if order_id is not None:
+            data["order_id"] = order_id
+        self.log_trade(symbol, "TP", side, data, timestamp=timestamp)
 
     def log_sl(
         self,
@@ -203,10 +224,15 @@ class TradeLogger:
         price: float,
         amount: float,
         pnl: float,
+        order_id: Optional[str] = None,
+        timestamp: Optional[datetime] = None,
     ) -> None:
         """Log SL fill."""
-        self.log_trade(symbol, "SL", side, {
+        data: Dict[str, Any] = {
             "price": price,
             "amount": amount,
             "pnl": pnl,
-        })
+        }
+        if order_id is not None:
+            data["order_id"] = order_id
+        self.log_trade(symbol, "SL", side, data, timestamp=timestamp)

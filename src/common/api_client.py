@@ -306,6 +306,29 @@ class APIClient:
         result = self.client.query_order(symbol=binance_symbol, orderId=int(order_id))
         return self._normalize_order_response(result)
 
+    def get_account_trades(
+        self,
+        symbol: str,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        from_id: Optional[int] = None,
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        """Fetch user trade history (/fapi/v1/userTrades). Returns raw dicts.
+
+        Each trade contains: id, orderId, symbol, side (BUY/SELL),
+        positionSide (LONG/SHORT), price, qty, realizedPnl, commission, time, maker.
+        """
+        binance_symbol = self._to_binance_symbol(symbol)
+        params: Dict[str, Any] = {"symbol": binance_symbol, "limit": limit}
+        if start_time is not None:
+            params["startTime"] = start_time
+        if end_time is not None:
+            params["endTime"] = end_time
+        if from_id is not None:
+            params["fromId"] = from_id
+        return self.client.get_account_trades(**params)
+
     def get_ticker(self, symbol: str) -> Dict[str, Any]:
         """Fetch current price."""
         binance_symbol = self._to_binance_symbol(symbol)

@@ -5,7 +5,7 @@ import os
 import signal
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -15,6 +15,7 @@ from src.common.logger import setup_logger
 from src.common.trading_config import TradingConfig
 from src.trading.bnb_manager import BnbManager
 from src.trading.margin_manager import MarginManager
+from src.trading.offline_recovery import OfflineRecovery, ReconEvent
 from src.trading.price_feed import PriceFeed, OrderUpdateFeed
 from src.trading.state_manager import StateManager, TradeLogger
 from src.trading.strategy import DCAStrategy, DCALevel, PositionState
@@ -118,16 +119,26 @@ class SymbolTrader:
             self.short_state = saved_state["short"]
             self.logger.info("Loaded saved state")
 
-        # Sync with exchange positions
-        self._sync_with_exchange()
-
-        # Initialize balance snapshot (PnL baseline)
+        # Fetch equity before offline recovery — _handle_tp may call
+        # _try_update_margin during replay, which needs _cached_equity.
         try:
             equity = self.api.get_account_equity()
             self._last_equity = equity
             self._cached_equity = equity
         except Exception as e:
             self.logger.warning(f"Initial equity snapshot failed: {e}")
+
+        # Reconstruct offline events (TP/SL/DCA fills that occurred while down).
+        # Must run BEFORE _sync_with_exchange — needs saved tp/sl order_ids
+        # intact to classify events. Safe no-op when no saved state exists.
+        if saved_state:
+            try:
+                self._reconstruct_offline_events(saved_state.get("updated_at"))
+            except Exception as e:
+                self.logger.error(f"Offline recovery failed, continuing: {e}")
+
+        # Sync with exchange positions
+        self._sync_with_exchange()
 
         # Before price feed starts, fetch current price via REST (for monitor display)
         if self._current_price <= 0:
@@ -144,6 +155,212 @@ class SymbolTrader:
             f"Initialized {self.symbol} - Capital: ${self.capital:.2f}, "
             f"Leverage: {lev}x"
         )
+
+    # ── Offline recovery ──
+
+    _RECOVERY_SLACK_MS = 5 * 60 * 1000  # 5-minute slack for clock skew / save-lag
+    _TRADE_LOG_DIR = Path("data/logs/trades")
+
+    def _recovery_start_ms(self, saved_updated_at: Optional[str]) -> int:
+        """Lower bound of exchange-history fetch window.
+
+        Picks max(saved_state.updated_at, latest_trade_log_ts) minus a 5-min
+        slack. Falls back to MAX_LOOKBACK_DAYS ago when neither is available.
+        """
+        candidates: List[int] = []
+
+        if saved_updated_at:
+            try:
+                dt = datetime.fromisoformat(saved_updated_at)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                candidates.append(int(dt.timestamp() * 1000))
+            except Exception:
+                pass
+
+        last_log_ts = self._latest_trade_log_timestamp()
+        if last_log_ts is not None:
+            candidates.append(last_log_ts)
+
+        now_ms = int(time.time() * 1000)
+        if not candidates:
+            return now_ms - OfflineRecovery.MAX_LOOKBACK_DAYS * 24 * 60 * 60 * 1000
+        return max(candidates) - self._RECOVERY_SLACK_MS
+
+    def _recent_month_log_paths(self) -> List[Path]:
+        """Current + previous month JSONL paths for this symbol (for dedup/scan)."""
+        safe = self.symbol.replace("/", "_")
+        now = datetime.now(timezone.utc)
+        prev = now.replace(day=1) - timedelta(days=1)
+        months = [now.strftime("%Y%m"), prev.strftime("%Y%m")]
+        return [self._TRADE_LOG_DIR / f"{safe}_{m}.jsonl" for m in months]
+
+    def _latest_trade_log_timestamp(self) -> Optional[int]:
+        """Scan this symbol's current + previous month JSONL for the newest event."""
+        latest: Optional[int] = None
+        for path in self._recent_month_log_paths():
+            if not path.exists():
+                continue
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        rec = json.loads(line)
+                        ts = datetime.fromisoformat(rec["timestamp"])
+                        if ts.tzinfo is None:
+                            ts = ts.replace(tzinfo=timezone.utc)
+                        ms = int(ts.timestamp() * 1000)
+                        if latest is None or ms > latest:
+                            latest = ms
+            except Exception as e:
+                self.logger.warning(f"Trade log scan error for {path.name}: {e}")
+        return latest
+
+    def _seen_order_ids(self) -> Set[str]:
+        """Collect order_ids already recorded in the last two months of trade logs."""
+        seen: Set[str] = set()
+        for path in self._recent_month_log_paths():
+            if not path.exists():
+                continue
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        rec = json.loads(line)
+                        oid = rec.get("order_id")
+                        if oid:
+                            seen.add(str(oid))
+            except Exception as e:
+                self.logger.warning(f"seen_order_ids scan error for {path.name}: {e}")
+        return seen
+
+    def _apply_offline_dca(self, event: ReconEvent) -> None:
+        """Replay a DCA fill detected during offline recovery.
+
+        Mirrors _process_dca_fill but (a) uses the reconstructed fill price/qty
+        directly, (b) skips TP re-placement — the subsequent _reconcile_orders
+        will handle TP re-placement with the final avg_price, and (c) writes
+        the trade log with the exchange fill timestamp.
+        """
+        state = self.long_state if event.side == "long" else self.short_state
+
+        # If saved state has no prior position, treat as ENTRY-equivalent seed
+        # (rare — happens if the saved state was stale/missing entry info).
+        if not state.active or state.amount <= 0:
+            state.active = True
+            state.amount = event.qty
+            state.cost = event.price * event.qty
+            state.avg_price = event.price
+            if state.base_price == 0:
+                state.base_price = event.price
+            state.dca_count = 0
+            self.trade_logger.log_entry(
+                self.symbol, event.side, event.price, event.qty,
+                event.price * event.qty / max(self.strategy.get_leverage(event.side), 1),
+                order_id=event.order_id,
+                timestamp=event.timestamp,
+            )
+            self.logger.info(
+                f"[offline-recovery] Seeded {event.side.upper()} from ENTRY-like "
+                f"fill {event.order_id} @ {event.price:.4f} x {event.qty:.4f}"
+            )
+            return
+
+        new_amount, new_cost, new_avg = self.strategy.calculate_avg_price(
+            state.amount, state.cost, event.qty, event.price * event.qty,
+        )
+        state.amount = new_amount
+        state.cost = new_cost
+        state.avg_price = new_avg
+        state.dca_count += 1
+
+        level = state.dca_count
+        leverage = self.strategy.get_leverage(event.side)
+        margin = event.price * event.qty / leverage if leverage > 0 else 0.0
+
+        self.logger.info(
+            f"[offline-recovery] DCA{level} {event.side.upper()} - "
+            f"Price: {event.price:.4f}, Qty: {event.qty:.4f}, "
+            f"New Avg: {new_avg:.4f}, Total: {new_amount:.4f}"
+        )
+        self.trade_logger.log_dca(
+            self.symbol, event.side, level,
+            event.price, event.qty, margin, new_avg,
+            order_id=event.order_id,
+            timestamp=event.timestamp,
+        )
+
+    def _reconstruct_offline_events(self, saved_updated_at: Optional[str]) -> None:
+        """Fetch exchange trade history since last-alive time and replay missed fills.
+
+        Flow:
+          1. Compute start_ms from saved_updated_at + latest trade-log timestamp.
+          2. Fetch user trades, group by orderId.
+          3. Classify into ReconEvents (TP/SL by tp_order_id/sl_order_id match,
+             otherwise by positionSide/side).
+          4. Skip events whose order_id is already in the trade log (dedup).
+          5. Replay each event via _handle_tp / _handle_sl / _apply_offline_dca.
+        """
+        start_ms = self._recovery_start_ms(saved_updated_at)
+        seen_ids = self._seen_order_ids()
+
+        recovery = OfflineRecovery(self.api, self.symbol, self.logger)
+        trades = recovery.fetch_trades_since(start_ms)
+        if not trades:
+            self.logger.info("[offline-recovery] No trades found in window")
+            return
+
+        orders = recovery.group_by_order(trades)
+        events = recovery.classify_events(
+            orders, self.long_state, self.short_state, seen_ids,
+        )
+        if not events:
+            self.logger.info(
+                f"[offline-recovery] {len(orders)} orders fetched, "
+                f"0 new events after dedup"
+            )
+            return
+
+        self.logger.info(
+            f"[offline-recovery] Replaying {len(events)} missed event(s) "
+            f"from {len(orders)} order(s)"
+        )
+
+        for ev in events:
+            try:
+                if ev.kind == "ENTRY":
+                    # Only fires when saved state was missing the original entry.
+                    # Just log it — state will reconcile via _sync_with_exchange.
+                    leverage = self.strategy.get_leverage(ev.side)
+                    margin = ev.price * ev.qty / leverage if leverage > 0 else 0.0
+                    self.trade_logger.log_entry(
+                        self.symbol, ev.side, ev.price, ev.qty, margin,
+                        order_id=ev.order_id,
+                        timestamp=ev.timestamp,
+                    )
+                elif ev.kind == "DCA":
+                    self._apply_offline_dca(ev)
+                elif ev.kind == "TP":
+                    self._handle_tp(
+                        ev.side,
+                        fill_data={"avg_price": ev.price, "pnl": ev.pnl},
+                        log_timestamp=ev.timestamp,
+                    )
+                elif ev.kind == "SL":
+                    self._handle_sl(
+                        ev.side,
+                        fill_data={"avg_price": ev.price, "pnl": ev.pnl},
+                        log_timestamp=ev.timestamp,
+                    )
+            except Exception as e:
+                self.logger.error(
+                    f"[offline-recovery] Failed to replay {ev.kind} {ev.side} "
+                    f"{ev.order_id}: {e}"
+                )
 
     def _sync_with_exchange(self) -> None:
         """Sync local state with exchange positions."""
@@ -753,6 +970,7 @@ class SymbolTrader:
 
             fill_price = float(order.get("average", 0))
             filled_amount = float(order.get("filled", 0))
+            entry_order_id = str(order.get("id")) if order.get("id") is not None else None
 
             # Fallback: if no fill info in response, use mark price / order quantity
             if fill_price <= 0:
@@ -775,7 +993,10 @@ class SymbolTrader:
                 f"ENTRY {side.upper()} - Price: {fill_price:.2f}, "
                 f"Amount: {filled_amount:.4f}, Margin: {margin:.2f}"
             )
-            self.trade_logger.log_entry(self.symbol, side, fill_price, filled_amount, margin)
+            self.trade_logger.log_entry(
+                self.symbol, side, fill_price, filled_amount, margin,
+                order_id=entry_order_id,
+            )
 
             # Place DCA orders
             self._place_dca_orders(side)
@@ -1061,7 +1282,12 @@ class SymbolTrader:
             except Exception:
                 pass
 
-    def _handle_tp(self, side: str, fill_data: Optional[Dict[str, Any]] = None) -> None:
+    def _handle_tp(
+        self,
+        side: str,
+        fill_data: Optional[Dict[str, Any]] = None,
+        log_timestamp: Optional[datetime] = None,
+    ) -> None:
         """Handle TP fill — re-entry first, cleanup after.
 
         Args:
@@ -1069,6 +1295,9 @@ class SymbolTrader:
             fill_data: Order fill data from exchange (ORDER_TRADE_UPDATE).
                        Contains accurate `avg_price` and `pnl` (realized).
                        None if called from periodic_sync fallback.
+            log_timestamp: Override for the trade log event time. Used by
+                       offline recovery to record the actual exchange fill
+                       time rather than the replay time.
         """
         state = self.long_state if side == "long" else self.short_state
 
@@ -1076,6 +1305,7 @@ class SymbolTrader:
         old_amount = state.amount
         old_dca_orders = state.dca_orders
         old_sl_order_id = state.sl_order_id
+        old_tp_order_id = state.tp_order_id
 
         # Use exchange-provided fill data when available (most accurate)
         if fill_data and float(fill_data.get("avg_price", 0)) > 0:
@@ -1102,12 +1332,19 @@ class SymbolTrader:
             f"PnL: {realized_pnl:.2f}"
         )
         self.trade_logger.log_tp(
-            self.symbol, side, close_price, old_amount, realized_pnl
+            self.symbol, side, close_price, old_amount, realized_pnl,
+            order_id=old_tp_order_id,
+            timestamp=log_timestamp,
         )
 
         self._save_state()
 
-    def _handle_sl(self, side: str, fill_data: Optional[Dict[str, Any]] = None) -> None:
+    def _handle_sl(
+        self,
+        side: str,
+        fill_data: Optional[Dict[str, Any]] = None,
+        log_timestamp: Optional[datetime] = None,
+    ) -> None:
         """Handle SL fill.
 
         Args:
@@ -1115,12 +1352,16 @@ class SymbolTrader:
             fill_data: Order fill data from exchange (ORDER_TRADE_UPDATE).
                        Contains accurate `avg_price` and `pnl` (realized).
                        None if called from periodic_sync fallback.
+            log_timestamp: Override for the trade log event time. When set,
+                       also used as `last_sl_time` so the cooldown starts
+                       from the actual exchange fill time rather than replay.
         """
         state = self.long_state if side == "long" else self.short_state
 
         # SL already filled → cancel only old DCA + TP (skip SL)
         old_dca_orders = state.dca_orders
         old_tp_order_id = state.tp_order_id
+        old_sl_order_id = state.sl_order_id
         state.dca_orders = []
         state.sl_order_id = None
         state.tp_order_id = None
@@ -1154,12 +1395,14 @@ class SymbolTrader:
             f"PnL: {realized_pnl:.2f}"
         )
         self.trade_logger.log_sl(
-            self.symbol, side, close_price, state.amount, realized_pnl
+            self.symbol, side, close_price, state.amount, realized_pnl,
+            order_id=old_sl_order_id,
+            timestamp=log_timestamp,
         )
 
         # Reset state (preserve cooldown)
         state.reset()
-        state.last_sl_time = datetime.now(timezone.utc)
+        state.last_sl_time = log_timestamp or datetime.now(timezone.utc)
         self._try_update_margin()  # refresh capital for next entry
 
         self._save_state()
@@ -1252,7 +1495,8 @@ class SymbolTrader:
         if is_final:
             self.trade_logger.log_dca(
                 self.symbol, side, dca.level,
-                fill_price, cumulative_filled, dca.margin, new_avg
+                fill_price, cumulative_filled, dca.margin, new_avg,
+                order_id=dca.order_id,
             )
 
         # SL uses closePosition=true — no re-placement needed on DCA fill
