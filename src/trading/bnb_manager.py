@@ -61,11 +61,11 @@ class BnbManager:
     # ── private ──────────────────────────────────────────────
 
     def _get_bnb_balance(self) -> float:
-        """Fetch available BNB balance in Futures wallet."""
+        """Fetch actual BNB balance in Futures wallet (not cross-margin available)."""
         balances = self.api.client.balance()
         for b in balances:
             if b["asset"] == "BNB":
-                return float(b["availableBalance"])
+                return float(b["balance"])
         return 0.0
 
     def _get_bnb_price(self) -> float:

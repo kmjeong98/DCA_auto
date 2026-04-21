@@ -12,6 +12,10 @@ Binance Futures bidirectional DCA trading bot. Runs Long and Short positions sim
 # Setup
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+# First time: copy example configs and fill in API keys
+cp config/.env.example config/.env
+cp config/config.example.json config/config.json
+cp config/optimize_config.example.json config/optimize_config.json
 
 # Trading
 python3 main_trading.py --testnet              # testnet mode
@@ -20,6 +24,7 @@ python3 main_trading.py --config config/my.json # custom config
 
 # GA Optimization
 python3 main_optimize.py                        # runs for all tickers in optimize_config.json
+python3 main_optimize.py --tickers BTC/USDT ETH/USDT  # specific tickers only
 
 # Monitoring
 python3 main_web_monitor.py                     # localhost:8080, auto-opens browser
@@ -38,10 +43,13 @@ pm2 restart dca-bot
 
 ## Architecture
 
-Four independent processes (see `ecosystem.config.js`):
+Three PM2-managed processes (see `ecosystem.config.js`):
 - **dca-bot** (`main_trading.py`) — 24/7 live trading
-- **dca-optimize** (`main_optimize.py`) — cron-triggered GA optimization (Wed/Sat 9am)
-- **dca-report** (`main_daily_report.py`) — Telegram daily PnL report
+- **dca-optimize** (`main_optimize.py`) — cron-triggered GA optimization (Wed/Sat 9am, `autorestart: false`)
+- **dca-report** (`main_daily_report.py`) — Telegram daily PnL report (long-poll mode)
+
+Plus one standalone process (not in PM2):
+- **web monitor** (`main_web_monitor.py`) — browser dashboard, run manually
 
 ### src/trading/ — Live Trading
 
@@ -86,7 +94,7 @@ TradingExecutor (single-threaded main loop)
 - `api_client.py` — Binance Futures REST wrapper (`binance-futures-connector`'s `UMFutures`)
 - `trading_config.py` — loads `config/config.json` (symbols, weights)
 - `config_loader.py` — loads GA params from `data/params/`; falls back from USDC to USDT variant if missing
-- `data_manager.py` — OHLCV fetcher via CCXT with `data/ohlcv_cache/` caching
+- `data_manager.py` — OHLCV fetcher via CCXT (`ccxt` installed separately, not in requirements.txt) with `data/ohlcv_cache/` caching
 - `logger.py` — per-component logger factory; outputs to `data/logs/{component}.log`
 
 ### Web Monitor & Daily Report
@@ -99,7 +107,7 @@ TradingExecutor (single-threaded main loop)
 
 ## Config Files
 
-- `config/.env` — API keys (`BINANCE_API_KEY`, `BINANCE_API_SECRET`, `USE_TESTNET`), Telegram bot token
+- `config/.env` — API keys (`BINANCE_API_KEY`, `BINANCE_API_SECRET`, `USE_TESTNET`), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
 - `config/config.json` — trading symbols with weight-based capital allocation
 - `config/optimize_config.json` — GA settings, simulation parameters, ticker list
 
@@ -111,6 +119,7 @@ TradingExecutor (single-threaded main loop)
 - DCA uses geometric level spacing: `price_deviation`, `dev_multiplier`, `vol_multiplier`
 - Orders: Base=MARKET, DCA=LIMIT, TP=LIMIT(reduceOnly), SL=STOP_MARKET(mark price trigger)
 - `data/` directory is not git-tracked (runtime state, logs, params)
+- Config files (`config/.env`, `config/config.json`, `config/optimize_config.json`) are gitignored; only `.example` templates are tracked
 - The `.venv` virtualenv is specified as the PM2 interpreter in `ecosystem.config.js`
 - All comments and docstrings are in English
 - Capital allocation: `wallet_balance × weight[coin]`; weight sum > 1.0 is allowed (over-leverage)

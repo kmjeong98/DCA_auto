@@ -34,6 +34,8 @@ class PriceFeed:
 
         self._ws_client: Optional[UMFuturesWebsocketClient] = None
         self._running = False
+        self._reconnect_lock = threading.Lock()
+        self._last_tick_time = 0.0
 
         # Symbol mapping (BTC/USDT -> btcusdt)
         self._stream_to_symbol: Dict[str, str] = {}
@@ -58,6 +60,7 @@ class PriceFeed:
                 if symbol:
                     with self._lock:
                         self._prices[symbol] = mark_price
+                    self._last_tick_time = time.time()
 
                     try:
                         self.on_price_update(symbol, mark_price)
@@ -69,17 +72,39 @@ class PriceFeed:
         except Exception as e:
             self.logger.error(f"Message processing error: {e}")
 
+    def _reconnect(self) -> None:
+        # Some error paths trigger both _on_error and _on_close; lock prevents
+        # duplicate reconnect attempts racing against each other.
+        if not self._reconnect_lock.acquire(blocking=False):
+            return
+        try:
+            if not self._running:
+                return
+            self.logger.info("Reconnecting in 5s...")
+            time.sleep(5)
+            try:
+                if self._ws_client:
+                    self._ws_client.stop()
+            except Exception:
+                pass
+            self._connect()
+        finally:
+            self._reconnect_lock.release()
+
     def _on_close(self, _) -> None:
         """Handle WebSocket connection close."""
         self.logger.warning("WebSocket closed")
-        if self._running:
-            self.logger.info("Reconnecting in 5s...")
-            time.sleep(5)
-            self._connect()
+        self._reconnect()
 
     def _on_error(self, _, error) -> None:
-        """Handle WebSocket error."""
+        """Handle WebSocket error — some errors never fire _on_close."""
         self.logger.error(f"WebSocket error: {error}")
+        self._reconnect()
+
+    def seconds_since_last_tick(self) -> float:
+        if self._last_tick_time <= 0:
+            return 0.0
+        return time.time() - self._last_tick_time
 
     def _on_open(self, _) -> None:
         """WebSocket connection established."""
@@ -171,6 +196,7 @@ class OrderUpdateFeed:
 
         self._ws_client: Optional[UMFuturesWebsocketClient] = None
         self._running = False
+        self._reconnect_lock = threading.Lock()
 
     def _on_message(self, _, message: str) -> None:
         """Handle message."""
@@ -210,14 +236,29 @@ class OrderUpdateFeed:
         except Exception as e:
             self.logger.error(f"Message error: {e}")
 
+    def _reconnect(self) -> None:
+        if not self._reconnect_lock.acquire(blocking=False):
+            return
+        try:
+            if not self._running:
+                return
+            time.sleep(5)
+            try:
+                if self._ws_client:
+                    self._ws_client.stop()
+            except Exception:
+                pass
+            self._connect()
+        finally:
+            self._reconnect_lock.release()
+
     def _on_close(self, _) -> None:
         self.logger.warning("WebSocket closed")
-        if self._running:
-            time.sleep(5)
-            self._connect()
+        self._reconnect()
 
     def _on_error(self, _, error) -> None:
         self.logger.error(f"WebSocket error: {error}")
+        self._reconnect()
 
     def _on_open(self, _) -> None:
         self.logger.info("User data stream connected")

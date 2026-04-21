@@ -200,13 +200,15 @@ class APIClient:
         self,
         symbol: str,
         side: str,
-        amount: float,
         stop_price: float,
         position_side: str = "LONG",
     ) -> Dict[str, Any]:
-        """Place stop-loss order (Algo Order STOP_MARKET — mark price trigger)."""
+        """Place stop-loss order (Algo Order STOP_MARKET — closePosition).
+
+        Uses closePosition=true so the entire position for this side is closed
+        at trigger time.  No quantity needed; immune to DCA amount changes.
+        """
         binance_symbol = self._to_binance_symbol(symbol)
-        amount = self.round_amount(symbol, amount)
         stop_price = self.round_price(symbol, stop_price)
 
         result = self.client.sign_request(
@@ -218,7 +220,7 @@ class APIClient:
                 "side": side.upper(),
                 "positionSide": position_side,
                 "type": "STOP_MARKET",
-                "quantity": amount,
+                "closePosition": "true",
                 "triggerPrice": stop_price,
                 "workingType": "MARK_PRICE",
             },
@@ -340,10 +342,16 @@ class APIClient:
         return self._round_step(price, tick_size)
 
     def round_amount(self, symbol: str, amount: float) -> float:
-        """Round amount to symbol precision."""
+        """Round amount DOWN to symbol precision (for new orders)."""
         filters = self._get_filters(symbol)
         step_size = float(filters.get("LOT_SIZE", {}).get("stepSize", "0.001"))
         return self._round_step(amount, step_size)
+
+    def snap_amount(self, symbol: str, amount: float) -> float:
+        """Round amount to NEAREST stepSize (for closing accumulated positions)."""
+        filters = self._get_filters(symbol)
+        step_size = float(filters.get("LOT_SIZE", {}).get("stepSize", "0.001"))
+        return self._snap_step(amount, step_size)
 
     def get_symbol_specs(self, symbol: str) -> Dict[str, Any]:
         """Return trading specs (stepSize, tickSize, minQty) for a symbol."""
@@ -388,6 +396,14 @@ class APIClient:
             return value
         precision = max(0, int(round(-math.log10(step))))
         return round(math.floor(value / step) * step, precision)
+
+    @staticmethod
+    def _snap_step(value: float, step: float) -> float:
+        """Round value to nearest step unit."""
+        if step <= 0:
+            return value
+        precision = max(0, int(round(-math.log10(step))))
+        return round(round(value / step) * step, precision)
 
     @staticmethod
     def _normalize_order_response(raw: Dict[str, Any]) -> Dict[str, Any]:

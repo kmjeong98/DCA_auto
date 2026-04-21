@@ -21,9 +21,6 @@ module.exports = {
       script: "main_daily_report.py",
       interpreter: ".venv/bin/python3",
       cwd: __dirname,
-      cron_restart: "0 0 * * *", // daily at 00:00 UTC = 09:00 KST
-      autorestart: false,
-      watch: false,
     },
   ],
 };

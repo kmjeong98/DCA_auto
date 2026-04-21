@@ -12,6 +12,7 @@ class DCALevel:
     trigger_price: float  # trigger price
     margin: float  # margin amount
     order_id: Optional[str] = None  # exchange order ID
+    last_filled: float = 0.0  # accumulated filled qty (for partial fill tracking)
 
 
 @dataclass
@@ -58,7 +59,7 @@ class PositionState:
             "last_sl_time": self.last_sl_time.isoformat() if self.last_sl_time else None,
             "entry_time": self.entry_time.isoformat() if self.entry_time else None,
             "dca_orders": [
-                {"level": d.level, "trigger_price": d.trigger_price, "margin": d.margin, "order_id": d.order_id}
+                {"level": d.level, "trigger_price": d.trigger_price, "margin": d.margin, "order_id": d.order_id, "last_filled": d.last_filled}
                 for d in self.dca_orders
             ],
             "sl_order_id": self.sl_order_id,
@@ -87,6 +88,7 @@ class PositionState:
                 trigger_price=d["trigger_price"],
                 margin=d["margin"],
                 order_id=d.get("order_id"),
+                last_filled=d.get("last_filled", 0.0),
             )
             for d in data.get("dca_orders", [])
         ]

@@ -45,7 +45,6 @@ class SymbolTrader:
         self._params_safe_name = safe_name
         self.cooldown_hours = cooldown_hours
         self._weight_changed = False
-        self._needs_update = False
         self._config_path = config_path
 
         # Initialize strategy
@@ -69,6 +68,7 @@ class SymbolTrader:
 
         # Balance snapshot (for PnL calculation)
         self._last_equity: float = 0.0
+        self._cached_equity: float = 0.0
 
         # active_params directory
         self._active_params_dir = Path("data/active_params")
@@ -123,7 +123,9 @@ class SymbolTrader:
 
         # Initialize balance snapshot (PnL baseline)
         try:
-            self._last_equity = self.api.get_account_equity()
+            equity = self.api.get_account_equity()
+            self._last_equity = equity
+            self._cached_equity = equity
         except Exception as e:
             self.logger.warning(f"Initial equity snapshot failed: {e}")
 
@@ -240,6 +242,43 @@ class SymbolTrader:
                             f"[periodic_sync] {side.upper()} closed by SL — cooldown"
                         )
                         self._handle_sl(side)
+
+            # Clean up orphan algo orders (e.g. SL cancel failed during DCA fill)
+            tracked_algo_ids: set = set()
+            for side in ("long", "short"):
+                state = self.long_state if side == "long" else self.short_state
+                if state.sl_order_id:
+                    tracked_algo_ids.add(state.sl_order_id)
+            try:
+                algo_orders = self.api.get_open_algo_orders(self.symbol)
+                for ao in algo_orders:
+                    ao_id = str(ao["id"])
+                    if ao_id not in tracked_algo_ids:
+                        self.logger.warning(
+                            f"[periodic_sync] Cancelling orphan algo order {ao_id}"
+                        )
+                        try:
+                            self.api.cancel_algo_order(self.symbol, ao_id)
+                        except Exception as e:
+                            self.logger.error(
+                                f"[periodic_sync] Cancel orphan algo order error: {e}"
+                            )
+            except Exception as e:
+                self.logger.warning(f"[periodic_sync] Fetch algo orders error: {e}")
+
+            # Missing SL detection: active position without an SL order_id.
+            # Happens when a previous SL placement failed (e.g. -2021) and the
+            # pending_sl retry queue was lost on restart, or the exchange SL
+            # was cancelled externally. Re-place; if price already breached
+            # the SL level, _place_sl_order will force a market close.
+            for side in ("long", "short"):
+                state = self.long_state if side == "long" else self.short_state
+                if state.active and state.amount > 0 and not state.sl_order_id:
+                    self.logger.warning(
+                        f"[periodic_sync] {side.upper()} active but no SL order "
+                        f"— placing"
+                    )
+                    self._place_sl_order(side)
 
         except Exception as e:
             self.logger.error(f"Periodic sync error: {e}")
@@ -470,33 +509,42 @@ class SymbolTrader:
         except Exception as e:
             self.logger.warning(f"Config weight reload failed: {e}")
 
+    def update_cached_equity(self, equity: float) -> None:
+        """Update cached equity from polling loop (no API call here)."""
+        self._cached_equity = equity
+
     def _try_update_margin(self) -> None:
         """Attempt margin + params update.
 
-        Normally skipped if either side is active.
-        When _needs_update is set (by TP/SL), bypasses the active guard
-        and forces the update regardless of position state.
+        Margin: both sides inactive only.
+        Params: no active side with dca > 0.
+        Called from 5-min poll and from _handle_tp/_handle_sl after reset.
         """
-        if not self._needs_update:
-            if self.long_state.active or self.short_state.active:
-                return
+        both_inactive = not self.long_state.active and not self.short_state.active
 
-        # Apply latest weight from config
         self._reload_weight_from_config()
 
-        try:
-            new_balance = self.api.get_account_equity()
-            force = self._weight_changed or self._needs_update
-            self.capital = self.margin_manager.try_update(
-                self.symbol, self.weight, self.capital, new_balance, force=force
-            )
-            self._weight_changed = False
-        except Exception as e:
-            self.logger.error(f"Margin update error: {e}")
+        if self._cached_equity <= 0:
+            return
 
-        # Also attempt parameter update
-        self._try_update_params()
-        self._needs_update = False
+        # Margin update: both sides must be inactive
+        if both_inactive:
+            try:
+                force = self._weight_changed
+                self.capital = self.margin_manager.try_update(
+                    self.symbol, self.weight, self.capital, self._cached_equity, force=force
+                )
+                self._weight_changed = False
+            except Exception as e:
+                self.logger.error(f"Margin update error: {e}")
+
+        # Params update: no active side with DCA > 0
+        has_dca = (
+            (self.long_state.active and self.long_state.dca_count > 0)
+            or (self.short_state.active and self.short_state.dca_count > 0)
+        )
+        if not has_dca:
+            self._try_update_params()
 
     @staticmethod
     def _trading_params(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -654,8 +702,14 @@ class SymbolTrader:
             self.logger.error(f"Load active params error: {e}")
             return None
 
-    def _enter_position(self, side: str) -> bool:
-        """Enter base position via market order."""
+    def _enter_position(self, side: str, ref_price: float = 0.0) -> bool:
+        """Enter base position via market order.
+
+        Args:
+            ref_price: Reference price for quantity calculation (e.g. TP price
+                       on re-entry). Skips mark-price lookup when provided,
+                       shaving off one REST round-trip.
+        """
         # Do not enter new positions for symbols pending removal
         if self._marked_for_removal:
             return False
@@ -674,8 +728,8 @@ class SymbolTrader:
             margin = self.strategy.calculate_base_margin(self.capital, side)
             leverage = self.strategy.get_leverage(side)
 
-            # Fetch current price
-            price = self._current_price
+            # Use ref_price (TP re-entry) → _current_price → API fallback
+            price = ref_price if ref_price > 0 else self._current_price
             if price <= 0:
                 price = self.api.get_mark_price(self.symbol)
 
@@ -733,10 +787,8 @@ class SymbolTrader:
             self._place_tp_order(side)
 
             # Update balance snapshot (baseline after entry)
-            try:
-                self._last_equity = self.api.get_account_equity()
-            except Exception:
-                pass
+            if self._cached_equity > 0:
+                self._last_equity = self._cached_equity
 
             self._save_state()
             return True
@@ -785,23 +837,28 @@ class SymbolTrader:
                 self._pending_dca.append((side, dca))
 
     def _place_sl_order(self, side: str) -> None:
-        """Place SL order (STOP_MARKET — mark price trigger). Schedule retry on failure."""
+        """Place SL order (STOP_MARKET — mark price trigger). Schedule retry on failure.
+
+        If the SL level has already been breached by the current market price
+        (Binance error -2021 "Order would immediately trigger"), force a market
+        close of the position through `_force_sl_market_close`.
+        """
         state = self.long_state if side == "long" else self.short_state
 
         if not state.active or state.amount <= 0:
             self._pending_sl.discard(side)
             return
 
+        sl_price = 0.0
         try:
             sl_price = self.strategy.calculate_sl_price(state.base_price, side)
             sl_price = self.api.round_price(self.symbol, sl_price)
 
             position_side = "LONG" if side == "long" else "SHORT"
             order_side = "sell" if side == "long" else "buy"
-            amount = self.api.round_amount(self.symbol, state.amount)
 
             order = self.api.place_stop_loss(
-                self.symbol, order_side, amount, sl_price, position_side,
+                self.symbol, order_side, sl_price, position_side,
             )
 
             state.sl_order_id = str(order.get("id"))
@@ -809,12 +866,58 @@ class SymbolTrader:
 
             self.logger.info(
                 f"SL {side.upper()} placed - Price: {sl_price:.2f}, "
-                f"Amount: {amount:.4f}"
+                f"closePosition=true"
             )
 
         except Exception as e:
-            self.logger.error(f"SL order error ({side}): {e}")
-            self._pending_sl.add(side)
+            err_str = str(e)
+            # -2021 "Order would immediately trigger" → SL level already breached
+            if "-2021" in err_str or "immediately trigger" in err_str.lower():
+                self.logger.warning(
+                    f"SL price {sl_price:.4f} already breached by mark → "
+                    f"force market close {side.upper()}"
+                )
+                self._pending_sl.discard(side)
+                self._force_sl_market_close(side)
+            else:
+                self.logger.error(f"SL order error ({side}): {e}")
+                self._pending_sl.add(side)
+
+    def _force_sl_market_close(self, side: str) -> None:
+        """Force market close a position whose SL level is already breached.
+
+        Routes through `_handle_sl` so the trade is logged as an SL event with
+        proper cooldown and state cleanup.
+        """
+        state = self.long_state if side == "long" else self.short_state
+        if not state.active or state.amount <= 0:
+            return
+
+        position_side = "LONG" if side == "long" else "SHORT"
+        order_side = "sell" if side == "long" else "buy"
+        amount = self.api.round_amount(self.symbol, state.amount)
+
+        try:
+            order = self.api.place_market_order(
+                self.symbol, order_side, amount, position_side,
+            )
+            fill_price = float(order.get("average", 0))
+            if fill_price <= 0:
+                fill_price = self._current_price
+            filled = float(order.get("filled", amount))
+
+            self.logger.info(
+                f"Forced SL market close {side.upper()} - "
+                f"Price: {fill_price:.4f}, Amount: {filled:.4f}"
+            )
+
+            # Route through _handle_sl for consistent logging + cooldown.
+            # realized pnl unknown from market order response → let fallback
+            # path in _handle_sl estimate via cached equity diff.
+            fill_data = {"avg_price": fill_price, "pnl": 0.0}
+            self._handle_sl(side, fill_data)
+        except Exception as e:
+            self.logger.error(f"Force SL market close error ({side}): {e}")
 
     def has_pending_orders(self) -> bool:
         """Check if there are pending retry orders."""
@@ -893,7 +996,7 @@ class SymbolTrader:
 
             position_side = "LONG" if side == "long" else "SHORT"
             order_side = "sell" if side == "long" else "buy"
-            amount = self.api.round_amount(self.symbol, state.amount)
+            amount = self.api.snap_amount(self.symbol, state.amount)
 
             order = self.api.place_take_profit(
                 self.symbol, order_side, amount, tp_price, position_side,
@@ -958,46 +1061,61 @@ class SymbolTrader:
             except Exception:
                 pass
 
-    def _handle_tp(self, side: str) -> None:
-        """Handle TP fill — re-entry first, cleanup after."""
+    def _handle_tp(self, side: str, fill_data: Optional[Dict[str, Any]] = None) -> None:
+        """Handle TP fill — re-entry first, cleanup after.
+
+        Args:
+            side: "long" or "short"
+            fill_data: Order fill data from exchange (ORDER_TRADE_UPDATE).
+                       Contains accurate `avg_price` and `pnl` (realized).
+                       None if called from periodic_sync fallback.
+        """
         state = self.long_state if side == "long" else self.short_state
 
-        # ── ① Immediate re-entry (top priority) ──
-        # Temporarily save old order ID, reset → enter market order immediately
+        # Save old state before reset
         old_amount = state.amount
         old_dca_orders = state.dca_orders
         old_sl_order_id = state.sl_order_id
-        state.reset()
 
-        self._enter_position(side)
+        # Use exchange-provided fill data when available (most accurate)
+        if fill_data and float(fill_data.get("avg_price", 0)) > 0:
+            close_price = float(fill_data["avg_price"])
+            realized_pnl = float(fill_data.get("pnl", 0))
+        else:
+            # Fallback (periodic_sync path) — use calculated tp_price
+            close_price = self.strategy.calculate_tp_price(state.avg_price, side)
+            realized_pnl = (
+                self._cached_equity - self._last_equity
+                if self._cached_equity > 0 else 0.0
+            )
+
+        # ── ① Immediate re-entry (top priority) ──
+        state.reset()
+        self._try_update_margin()  # refresh capital before re-entry
+        self._enter_position(side, ref_price=close_price)
 
         # ── ② Clean up previous orders (after market order sent) ──
         self._cancel_old_orders(old_dca_orders, old_sl_order_id)
 
-        # ── ③ Calculate PnL (called once) ──
-        try:
-            new_equity = self.api.get_account_equity()
-            pnl = new_equity - self._last_equity
-            self._last_equity = new_equity
-        except Exception:
-            new_equity = 0.0
-            pnl = 0.0
-
         self.logger.info(
-            f"TP HIT {side.upper()} - Price: {self._current_price:.2f}, "
-            f"PnL: {pnl:.2f}"
+            f"TP HIT {side.upper()} - Fill Price: {close_price:.2f}, "
+            f"PnL: {realized_pnl:.2f}"
         )
         self.trade_logger.log_tp(
-            self.symbol, side, self._current_price, old_amount, pnl
+            self.symbol, side, close_price, old_amount, realized_pnl
         )
-
-        # ── ④ Defer margin + params update to 5-min cycle ──
-        self._needs_update = True
 
         self._save_state()
 
-    def _handle_sl(self, side: str) -> None:
-        """Handle SL fill."""
+    def _handle_sl(self, side: str, fill_data: Optional[Dict[str, Any]] = None) -> None:
+        """Handle SL fill.
+
+        Args:
+            side: "long" or "short"
+            fill_data: Order fill data from exchange (ORDER_TRADE_UPDATE).
+                       Contains accurate `avg_price` and `pnl` (realized).
+                       None if called from periodic_sync fallback.
+        """
         state = self.long_state if side == "long" else self.short_state
 
         # SL already filled → cancel only old DCA + TP (skip SL)
@@ -1019,29 +1137,30 @@ class SymbolTrader:
             except Exception:
                 pass
 
-        # Balance-based PnL calculation (once)
-        try:
-            new_equity = self.api.get_account_equity()
-            pnl = new_equity - self._last_equity
-            self._last_equity = new_equity
-        except Exception:
-            new_equity = 0.0
-            pnl = 0.0
+        # Use exchange-provided fill data when available (most accurate)
+        if fill_data and float(fill_data.get("avg_price", 0)) > 0:
+            close_price = float(fill_data["avg_price"])
+            realized_pnl = float(fill_data.get("pnl", 0))
+        else:
+            # Fallback (periodic_sync path) — stale, less accurate
+            close_price = self._current_price
+            realized_pnl = (
+                self._cached_equity - self._last_equity
+                if self._cached_equity > 0 else 0.0
+            )
 
         self.logger.info(
-            f"SL HIT {side.upper()} - Price: {self._current_price:.2f}, "
-            f"PnL: {pnl:.2f}"
+            f"SL HIT {side.upper()} - Fill Price: {close_price:.2f}, "
+            f"PnL: {realized_pnl:.2f}"
         )
         self.trade_logger.log_sl(
-            self.symbol, side, self._current_price, state.amount, pnl
+            self.symbol, side, close_price, state.amount, realized_pnl
         )
 
         # Reset state (preserve cooldown)
         state.reset()
         state.last_sl_time = datetime.now(timezone.utc)
-
-        # Defer margin + params update to 5-min cycle
-        self._needs_update = True
+        self._try_update_margin()  # refresh capital for next entry
 
         self._save_state()
 
@@ -1066,7 +1185,25 @@ class SymbolTrader:
                     remaining_dcas.append(dca)
 
             for dca in filled_dcas:
-                self._process_dca_fill(side, dca)
+                # Query exchange for actual fill data
+                try:
+                    order_info = self.api.get_order(self.symbol, dca.order_id)
+                    poll_data = {
+                        "filled": float(order_info.get("filled", 0)),
+                        "avg_price": float(order_info.get("average", 0)),
+                        "status": "FILLED",
+                    }
+                except Exception as e:
+                    self.logger.warning(f"Failed to query DCA order {dca.order_id}: {e}")
+                    # Fallback to calculated values
+                    leverage = self.strategy.get_leverage(side)
+                    calc_amount = dca.margin * leverage / dca.trigger_price
+                    poll_data = {
+                        "filled": self.api.round_amount(self.symbol, calc_amount) + dca.last_filled,
+                        "avg_price": dca.trigger_price,
+                        "status": "FILLED",
+                    }
+                self._process_dca_fill(side, dca, poll_data)
 
             state.dca_orders = remaining_dcas
             if filled_dcas:
@@ -1075,42 +1212,51 @@ class SymbolTrader:
         except Exception as e:
             self.logger.error(f"DCA check error: {e}")
 
-    def _process_dca_fill(self, side: str, dca: DCALevel) -> None:
-        """Handle DCA fill — recalculate avg, re-place SL/TP."""
+    def _process_dca_fill(self, side: str, dca: DCALevel, data: Dict[str, Any]) -> None:
+        """Handle DCA fill (partial or full) — recalculate avg, re-place SL/TP."""
         state = self.long_state if side == "long" else self.short_state
+        is_final = (data.get("status") == "FILLED")
 
-        leverage = self.strategy.get_leverage(side)
-        add_notional = dca.margin * leverage
-        add_amount = add_notional / dca.trigger_price
+        # Use actual filled qty from exchange (cumulative - previous cumulative)
+        cumulative_filled = data.get("filled", 0)
+        add_amount = cumulative_filled - dca.last_filled
         add_amount = self.api.round_amount(self.symbol, add_amount)
+        dca.last_filled = cumulative_filled
+
+        if add_amount <= 0:
+            return
+
+        # Use actual avg fill price (limit order fills at same price, no error)
+        fill_price = data.get("avg_price", dca.trigger_price)
+        if fill_price <= 0:
+            fill_price = dca.trigger_price
 
         new_amount, new_cost, new_avg = self.strategy.calculate_avg_price(
-            state.amount, state.cost, add_amount, dca.trigger_price * add_amount,
+            state.amount, state.cost, add_amount, fill_price * add_amount,
         )
 
         state.amount = new_amount
         state.cost = new_cost
         state.avg_price = new_avg
-        state.dca_count += 1
 
+        # dca_count increments only on final fill
+        if is_final:
+            state.dca_count += 1
+
+        fill_type = "FILLED" if is_final else "PARTIAL"
         self.logger.info(
-            f"DCA{dca.level} FILLED {side.upper()} - "
-            f"Price: {dca.trigger_price:.2f}, New Avg: {new_avg:.2f}, "
-            f"Amount: {new_amount:.4f}"
+            f"DCA{dca.level} {fill_type} {side.upper()} - "
+            f"Price: {fill_price:.2f}, Qty: {add_amount:.4f}, "
+            f"New Avg: {new_avg:.2f}, Total: {new_amount:.4f}"
         )
-        self.trade_logger.log_dca(
-            self.symbol, side, dca.level,
-            dca.trigger_price, add_amount, dca.margin, new_avg
-        )
+        if is_final:
+            self.trade_logger.log_dca(
+                self.symbol, side, dca.level,
+                fill_price, cumulative_filled, dca.margin, new_avg
+            )
 
-        # Cancel SL → re-place (same base_price, increased amount) — Algo Order
-        if state.sl_order_id:
-            try:
-                self.api.cancel_algo_order(self.symbol, state.sl_order_id)
-                state.sl_order_id = None
-            except Exception as e:
-                self.logger.warning(f"Failed to cancel old SL {state.sl_order_id}: {e}")
-        self._place_sl_order(side)
+        # SL uses closePosition=true — no re-placement needed on DCA fill
+        # (trigger price is based on base_price which doesn't change)
 
         # Cancel TP → re-place (new avg_price, increased amount)
         if state.tp_order_id:
@@ -1123,25 +1269,28 @@ class SymbolTrader:
 
     def on_order_filled(self, order_id: str, data: Dict[str, Any]) -> None:
         """Detect order fills from User Data Stream."""
+        status = data.get("status", "FILLED")
         with self._lock:
             for side in ["long", "short"]:
                 state = self.long_state if side == "long" else self.short_state
 
-                # Check TP fill
-                if state.tp_order_id == order_id:
-                    self._handle_tp(side)
+                # Check TP fill (only on FILLED)
+                if status == "FILLED" and state.tp_order_id == order_id:
+                    self._handle_tp(side, data)
                     return
 
-                # Check SL fill
-                if state.sl_order_id == order_id:
-                    self._handle_sl(side)
+                # Check SL fill (only on FILLED)
+                if status == "FILLED" and state.sl_order_id == order_id:
+                    self._handle_sl(side, data)
                     return
 
-                # Check DCA fill
+                # Check DCA fill (partial or full)
                 for dca in list(state.dca_orders):
                     if dca.order_id == order_id:
-                        state.dca_orders.remove(dca)
-                        self._process_dca_fill(side, dca)
+                        is_final = (status == "FILLED")
+                        if is_final:
+                            state.dca_orders.remove(dca)
+                        self._process_dca_fill(side, dca, data)
                         self._save_state()
                         return
 
@@ -1153,23 +1302,13 @@ class SymbolTrader:
         if not self._initialized:
             return
 
-        # Handle Long position
-        if self.long_state.active:
-            if self.strategy.check_tp_hit(price, self.long_state):
-                self._handle_tp("long")
-            elif self.strategy.check_sl_hit(price, self.long_state):
-                self._handle_sl("long")
-        else:
+        # TP/SL are handled by exchange orders → on_order_filled path
+        # on_price_update only triggers new entries when idle
+        if not self.long_state.active:
             if self.strategy.should_enter(self.long_state, self.cooldown_hours):
                 self._enter_position("long")
 
-        # Handle Short position
-        if self.short_state.active:
-            if self.strategy.check_tp_hit(price, self.short_state):
-                self._handle_tp("short")
-            elif self.strategy.check_sl_hit(price, self.short_state):
-                self._handle_sl("short")
-        else:
+        if not self.short_state.active:
             if self.strategy.should_enter(self.short_state, self.cooldown_hours):
                 self._enter_position("short")
 
@@ -1268,8 +1407,8 @@ class TradingExecutor:
         status = data.get("status", "")
         order_id = str(data.get("order_id", ""))
 
-        if symbol in self.traders and status == "FILLED":
-            self.logger.info(f"Order filled: {symbol} #{order_id}")
+        if symbol in self.traders and status in ("FILLED", "PARTIALLY_FILLED"):
+            self.logger.info(f"Order {status}: {symbol} #{order_id}")
             self.traders[symbol].on_order_filled(order_id, data)
 
     def _on_position_update(self, data: Dict[str, Any]) -> None:
@@ -1625,20 +1764,40 @@ class TradingExecutor:
                     if self._pending_removals:
                         self._process_pending_removals()
 
+                    # Every minute: watchdog — reconnect PriceFeed if ticks are stale.
+                    # Mark prices stream once per second; silence > 120s means the
+                    # WebSocket died without firing _on_close (see past incidents
+                    # on 2026-02-26, 03-16, 03-25, 04-06, 04-15).
+                    if self.price_feed:
+                        stale = self.price_feed.seconds_since_last_tick()
+                        if stale > 120:
+                            self.logger.warning(
+                                f"PriceFeed stale ({stale:.0f}s since last tick) — reconnecting"
+                            )
+                            self._reconnect_price_feed()
+
                     # Every 5 minutes: detect config changes + DCA polling backup + hot param update + sync
                     if poll_counter % 5 == 0:
                         self._check_config_update()
 
+                        # Fetch equity once, distribute to all traders
+                        try:
+                            cached_equity = self.api.get_account_equity()
+                        except Exception:
+                            cached_equity = 0.0
+
                         for trader in self.traders.values():
+                            trader.update_cached_equity(cached_equity)
                             trader._try_update_margin()
                             trader._check_and_handle_dca_fills("long")
                             trader._check_and_handle_dca_fills("short")
                             trader._try_hot_update_params()
                             trader.periodic_sync()
 
-                    # Every 10 minutes: check and refill BNB balance
+                    # Every 10 minutes: check and refill BNB balance + save equity snapshot
                     if poll_counter % 10 == 0:
                         self._bnb_manager.check_and_refill()
+                        self._save_equity_snapshot()
 
         except Exception as e:
             self.logger.error(f"Executor error: {e}")
@@ -1646,6 +1805,23 @@ class TradingExecutor:
 
         finally:
             self.shutdown()
+
+    _SNAPSHOT_DIR = Path("data/balance_snapshots")
+
+    def _save_equity_snapshot(self) -> None:
+        """Save equity snapshot to JSONL file (for 24h/monthly PnL)."""
+        try:
+            equity = self.api.get_account_equity()
+            if equity <= 0:
+                return
+            self._SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            now = datetime.now(timezone.utc)
+            filename = f"balance_{now.strftime('%Y%m')}.jsonl"
+            record = json.dumps({"t": now.isoformat(), "v": round(equity, 4)})
+            with (self._SNAPSHOT_DIR / filename).open("a", encoding="utf-8") as f:
+                f.write(record + "\n")
+        except Exception as e:
+            self.logger.error(f"Snapshot save error: {e}")
 
     def _log_status(self) -> None:
         """Log current state to file."""

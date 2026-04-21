@@ -95,8 +95,8 @@ def _load_snapshots(since: Optional[datetime] = None) -> List[Dict[str, Any]]:
 
 
 def _calc_pnl_from_snapshots(current: Optional[float]) -> Dict[str, Optional[float]]:
-    """Calculate 24h and monthly PnL from balance snapshots."""
-    result: Dict[str, Optional[float]] = {"pnl_24h": None, "pnl_monthly": None}
+    """Calculate 24h, 7d, and monthly PnL from balance snapshots."""
+    result: Dict[str, Optional[float]] = {"pnl_24h": None, "pnl_7d": None, "pnl_monthly": None}
     if current is None:
         return result
 
@@ -108,6 +108,13 @@ def _calc_pnl_from_snapshots(current: Optional[float]) -> Dict[str, Optional[flo
     if snapshots_24h:
         oldest_val = snapshots_24h[0]["v"]
         result["pnl_24h"] = current - oldest_val
+
+    # 7d PnL: find the oldest snapshot within 7d window
+    since_7d = now - timedelta(days=7)
+    snapshots_7d = _load_snapshots(since=since_7d)
+    if snapshots_7d:
+        oldest_val = snapshots_7d[0]["v"]
+        result["pnl_7d"] = current - oldest_val
 
     # Monthly PnL ($) + Estimated monthly return (%)
     month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -1341,7 +1348,7 @@ def main() -> None:
 
     def shutdown(signum, frame):
         print("\nShutting down...")
-        server.shutdown()
+        threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
@@ -1353,6 +1360,7 @@ def main() -> None:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
     server.serve_forever()
+    server.server_close()
 
 
 if __name__ == "__main__":
