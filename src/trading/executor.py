@@ -436,6 +436,7 @@ class SymbolTrader:
                 if amount > 0:
                     exchange_sides.add(side)
 
+            just_handled: set = set()
             for side in ("long", "short"):
                 state = self.long_state if side == "long" else self.short_state
                 if state.active and side not in exchange_sides:
@@ -459,6 +460,7 @@ class SymbolTrader:
                             f"[periodic_sync] {side.upper()} closed by SL — cooldown"
                         )
                         self._handle_sl(side)
+                    just_handled.add(side)
 
             # Clean up orphan algo orders (e.g. SL cancel failed during DCA fill)
             tracked_algo_ids: set = set()
@@ -496,6 +498,34 @@ class SymbolTrader:
                         f"— placing"
                     )
                     self._place_sl_order(side)
+
+            # Missing TP detection: active position whose tp_order_id is not in
+            # exchange open orders. _on_order_update ignores CANCELED/EXPIRED, so
+            # externally-cancelled TPs (e.g. manual cancel on Binance UI) are
+            # otherwise never recovered between restarts. Skip sides just handled
+            # by _handle_tp above — their fresh TP may not appear in open_orders
+            # yet due to replication lag.
+            sides_to_check_tp = [
+                s for s in ("long", "short") if s not in just_handled
+            ]
+            if sides_to_check_tp:
+                try:
+                    open_orders = self.api.get_open_orders(self.symbol)
+                    open_ids = {str(o["id"]) for o in open_orders}
+                    for side in sides_to_check_tp:
+                        state = self.long_state if side == "long" else self.short_state
+                        if not state.active or state.amount <= 0:
+                            continue
+                        if state.tp_order_id and state.tp_order_id in open_ids:
+                            continue
+                        self.logger.warning(
+                            f"[periodic_sync] {side.upper()} active but TP missing "
+                            f"(tracked: {state.tp_order_id}) — re-placing"
+                        )
+                        state.tp_order_id = None
+                        self._place_tp_order(side)
+                except Exception as e:
+                    self.logger.warning(f"[periodic_sync] TP check error: {e}")
 
         except Exception as e:
             self.logger.error(f"Periodic sync error: {e}")

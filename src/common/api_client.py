@@ -414,11 +414,18 @@ class APIClient:
 
     @staticmethod
     def _round_step(value: float, step: float) -> float:
-        """Floor value to step unit."""
+        """Floor value to step unit.
+
+        An epsilon (1e-9) is added before floor() to absorb IEEE 754 float
+        representation errors: e.g. 0.102/0.001 evaluates to 101.99999... which
+        would floor to 101 and produce 0.101. Without the epsilon, fill-qty
+        accounting drifts by one step per affected DCA fill, leaving dust on
+        the exchange after TP closes.
+        """
         if step <= 0:
             return value
         precision = max(0, int(round(-math.log10(step))))
-        return round(math.floor(value / step) * step, precision)
+        return round(math.floor(value / step + 1e-9) * step, precision)
 
     @staticmethod
     def _snap_step(value: float, step: float) -> float:
