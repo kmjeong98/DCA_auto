@@ -312,6 +312,7 @@ class APIClient:
         start_time: Optional[int] = None,
         end_time: Optional[int] = None,
         from_id: Optional[int] = None,
+        order_id: Optional[str] = None,
         limit: int = 1000,
     ) -> List[Dict[str, Any]]:
         """Fetch user trade history (/fapi/v1/userTrades). Returns raw dicts.
@@ -327,6 +328,8 @@ class APIClient:
             params["endTime"] = end_time
         if from_id is not None:
             params["fromId"] = from_id
+        if order_id is not None:
+            params["orderId"] = int(order_id)
         return self.client.get_account_trades(**params)
 
     def get_ticker(self, symbol: str) -> Dict[str, Any]:

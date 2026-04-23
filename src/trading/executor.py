@@ -1312,6 +1312,36 @@ class SymbolTrader:
             except Exception:
                 pass
 
+    def _fetch_close_fill(
+        self,
+        order_id: Optional[str],
+        fallback_price: float,
+    ) -> tuple:
+        """Fetch actual close price and summed realizedPnl for a closed order.
+
+        Used by periodic_sync fallback path when real-time fill_data is missing.
+        Returns (close_price, realized_pnl). On any error returns
+        (fallback_price, 0.0) so the caller can still proceed with best-effort.
+        """
+        if not order_id:
+            return fallback_price, 0.0
+        close_price = fallback_price
+        realized_pnl = 0.0
+        try:
+            order = self.api.get_order(self.symbol, order_id)
+            avg = float(order.get("average") or 0)
+            if avg > 0:
+                close_price = avg
+        except Exception as e:
+            self.logger.warning(f"Fetch order {order_id} for fill price failed: {e}")
+        try:
+            trades = self.api.get_account_trades(self.symbol, order_id=order_id)
+            for t in trades:
+                realized_pnl += float(t.get("realizedPnl", 0) or 0)
+        except Exception as e:
+            self.logger.warning(f"Fetch trades for order {order_id} failed: {e}")
+        return close_price, realized_pnl
+
     def _handle_tp(
         self,
         side: str,
@@ -1342,11 +1372,12 @@ class SymbolTrader:
             close_price = float(fill_data["avg_price"])
             realized_pnl = float(fill_data.get("pnl", 0))
         else:
-            # Fallback (periodic_sync path) — use calculated tp_price
-            close_price = self.strategy.calculate_tp_price(state.avg_price, side)
-            realized_pnl = (
-                self._cached_equity - self._last_equity
-                if self._cached_equity > 0 else 0.0
+            # Fallback (periodic_sync path) — fetch actual fill from exchange.
+            # Equity delta is unreliable here because it reflects unrealized
+            # PnL moves of every other coin, not this order's realized PnL.
+            close_price, realized_pnl = self._fetch_close_fill(
+                old_tp_order_id,
+                fallback_price=self.strategy.calculate_tp_price(state.avg_price, side),
             )
 
         # ── ① Immediate re-entry (top priority) ──
@@ -1413,11 +1444,10 @@ class SymbolTrader:
             close_price = float(fill_data["avg_price"])
             realized_pnl = float(fill_data.get("pnl", 0))
         else:
-            # Fallback (periodic_sync path) — stale, less accurate
-            close_price = self._current_price
-            realized_pnl = (
-                self._cached_equity - self._last_equity
-                if self._cached_equity > 0 else 0.0
+            # Fallback (periodic_sync path) — fetch actual fill from exchange.
+            close_price, realized_pnl = self._fetch_close_fill(
+                old_sl_order_id,
+                fallback_price=self._current_price,
             )
 
         self.logger.info(
