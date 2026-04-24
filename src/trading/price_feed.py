@@ -35,7 +35,10 @@ class PriceFeed:
         self._ws_client: Optional[UMFuturesWebsocketClient] = None
         self._running = False
         self._reconnect_lock = threading.Lock()
-        self._last_tick_time = 0.0
+        # Seed with now so the stale-tick watchdog can detect a feed that
+        # (re)connects but never delivers a tick. Leaving this at 0 made
+        # seconds_since_last_tick() return 0 forever, masking the outage.
+        self._last_tick_time = time.time()
 
         # Symbol mapping (BTC/USDT -> btcusdt)
         self._stream_to_symbol: Dict[str, str] = {}
@@ -102,8 +105,6 @@ class PriceFeed:
         self._reconnect()
 
     def seconds_since_last_tick(self) -> float:
-        if self._last_tick_time <= 0:
-            return 0.0
         return time.time() - self._last_tick_time
 
     def _on_open(self, _) -> None:
@@ -112,6 +113,10 @@ class PriceFeed:
 
     def _connect(self) -> None:
         """Connect and subscribe via WebSocket (Combined Stream — single connection)."""
+        # Reset the grace period so a reconnected socket that never delivers
+        # a tick will be detected as stale after the watchdog window elapses.
+        self._last_tick_time = time.time()
+
         self._ws_client = UMFuturesWebsocketClient(
             stream_url=self.ws_url,
             on_message=self._on_message,
