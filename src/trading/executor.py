@@ -16,7 +16,7 @@ from src.common.trading_config import TradingConfig
 from src.trading.bnb_manager import BnbManager
 from src.trading.margin_manager import MarginManager
 from src.trading.offline_recovery import OfflineRecovery, ReconEvent
-from src.trading.price_feed import PriceFeed, OrderUpdateFeed
+from src.trading.price_feed import OrderUpdateFeed
 from src.trading.state_manager import StateManager, TradeLogger
 from src.trading.strategy import DCAStrategy, DCALevel, PositionState
 
@@ -1598,16 +1598,21 @@ class SymbolTrader:
                         self._save_state()
                         return
 
-    def on_price_update(self, price: float) -> None:
-        """Price update callback."""
+    def update_price(self, price: float) -> None:
+        """Update cached mark price (called periodically by main loop)."""
         with self._lock:
             self._current_price = price
 
+    def check_reentry(self) -> None:
+        """Enter idle sides whose SL cooldown has elapsed.
+
+        Decoupled from price ticks: runs on the main-loop timer so that
+        re-entries happen even if price fetching fails for a cycle. TP/SL
+        are exchange orders handled via on_order_filled.
+        """
         if not self._initialized:
             return
 
-        # TP/SL are handled by exchange orders → on_order_filled path
-        # on_price_update only triggers new entries when idle
         if not self.long_state.active:
             if self.strategy.should_enter(self.long_state, self.cooldown_hours):
                 self._enter_position("long")
@@ -1675,8 +1680,7 @@ class TradingExecutor:
         # Per-symbol trader
         self.traders: Dict[str, SymbolTrader] = {}
 
-        # WebSocket feeds
-        self.price_feed: Optional[PriceFeed] = None
+        # WebSocket feed (user data stream only — mark prices are REST-polled)
         self.order_feed: Optional[OrderUpdateFeed] = None
         self._listen_key: Optional[str] = None
         self._listen_key_timer: Optional[threading.Timer] = None
@@ -1698,11 +1702,6 @@ class TradingExecutor:
             base = raw_symbol[:-4]
             return f"{base}/USDT"
         return raw_symbol
-
-    def _on_price_update(self, symbol: str, price: float) -> None:
-        """Price update callback (called from PriceFeed)."""
-        if symbol in self.traders:
-            self.traders[symbol].on_price_update(price)
 
     def _on_order_update(self, data: Dict[str, Any]) -> None:
         """Order update callback (called from OrderUpdateFeed)."""
@@ -1773,12 +1772,10 @@ class TradingExecutor:
                     self.traders[symbol]._try_update_margin()
 
         # Add symbols
-        need_reconnect = False
         for safe_name in added:
             sym_cfg = new_config.symbols[safe_name]
             self.logger.info(f"Adding new symbol: {sym_cfg.symbol}")
-            if self._add_trader(safe_name, sym_cfg):
-                need_reconnect = True
+            self._add_trader(safe_name, sym_cfg)
 
         # Remove symbols — register for pending removal, not immediate shutdown
         for safe_name in removed:
@@ -1788,10 +1785,6 @@ class TradingExecutor:
 
         # Replace config object
         self.config = new_config
-
-        # Reconnect PriceFeed (only when symbols added)
-        if need_reconnect:
-            self._reconnect_price_feed()
 
     def _add_trader(self, safe_name: str, sym_cfg: Any) -> bool:
         """Add new trader at runtime. Returns True on success."""
@@ -1864,9 +1857,6 @@ class TradingExecutor:
 
         self.logger.info(f"Trader removed: {symbol}")
 
-        # Reconnect PriceFeed (subscription symbols changed)
-        self._reconnect_price_feed()
-
     def _process_pending_removals(self) -> None:
         """Actually remove pending symbols where both sides are inactive."""
         for symbol in list(self._pending_removals):
@@ -1880,28 +1870,6 @@ class TradingExecutor:
                     f"{symbol} both sides inactive, removing trader"
                 )
                 self._remove_trader(symbol)
-
-    def _reconnect_price_feed(self) -> None:
-        """Reconnect PriceFeed based on current traders."""
-        if not self.price_feed:
-            return
-
-        current_symbols = list(self.traders.keys())
-        if not current_symbols:
-            self.logger.warning("No symbols left, stopping price feed")
-            self.price_feed.stop()
-            return
-
-        self.logger.info(f"Reconnecting PriceFeed: {current_symbols}")
-        self.price_feed.stop()
-        time.sleep(1)
-
-        self.price_feed = PriceFeed(
-            symbols=current_symbols,
-            on_price_update=self._on_price_update,
-            testnet=self.testnet,
-        )
-        self.price_feed.start()
 
     def _start_listen_key_renewal(self) -> None:
         """Renew Listen Key every 30 minutes."""
@@ -2021,14 +1989,6 @@ class TradingExecutor:
                     f"tickSize={specs['tickSize']}, minQty={specs['minQty']}"
                 )
 
-            # Start price feed
-            self.price_feed = PriceFeed(
-                symbols=list(self.traders.keys()),
-                on_price_update=self._on_price_update,
-                testnet=self.testnet,
-            )
-            self.price_feed.start()
-
             # Start User Data Stream
             try:
                 self._listen_key = self.api.new_listen_key()
@@ -2055,33 +2015,30 @@ class TradingExecutor:
             # Start order retry background thread
             self._start_order_retry_loop()
 
-            # Main loop (status monitoring + polling backup)
+            # Main loop — 3-second tick drives price refresh + re-entry.
+            # Other periodic tasks fan out via poll_counter (1 tick = 3s).
             poll_counter = 0
+            TICK_SECONDS = 3
+            TICKS_PER_MINUTE = 60 // TICK_SECONDS  # 20
             while not self._shutdown_event.is_set():
-                self._shutdown_event.wait(timeout=60)
+                self._shutdown_event.wait(timeout=TICK_SECONDS)
 
                 if not self._shutdown_event.is_set():
                     poll_counter += 1
-                    self._log_status()
 
-                    # Process pending removals (every 60 seconds)
-                    if self._pending_removals:
-                        self._process_pending_removals()
+                    # Every 3s: refresh mark prices + run re-entry checks.
+                    # Decoupled from any WebSocket so a network/connection
+                    # blip can't strand idle positions.
+                    self._refresh_prices_and_check_reentry()
 
-                    # Every minute: watchdog — reconnect PriceFeed if ticks are stale.
-                    # Mark prices stream once per second; silence > 120s means the
-                    # WebSocket died without firing _on_close (see past incidents
-                    # on 2026-02-26, 03-16, 03-25, 04-06, 04-15).
-                    if self.price_feed:
-                        stale = self.price_feed.seconds_since_last_tick()
-                        if stale > 120:
-                            self.logger.warning(
-                                f"PriceFeed stale ({stale:.0f}s since last tick) — reconnecting"
-                            )
-                            self._reconnect_price_feed()
+                    # Every 1 minute: status log + pending removals
+                    if poll_counter % TICKS_PER_MINUTE == 0:
+                        self._log_status()
+                        if self._pending_removals:
+                            self._process_pending_removals()
 
                     # Every 5 minutes: detect config changes + DCA polling backup + hot param update + sync
-                    if poll_counter % 5 == 0:
+                    if poll_counter % (5 * TICKS_PER_MINUTE) == 0:
                         self._check_config_update()
 
                         # Fetch equity once, distribute to all traders
@@ -2099,7 +2056,7 @@ class TradingExecutor:
                             trader.periodic_sync()
 
                     # Every 10 minutes: check and refill BNB balance + save equity snapshot
-                    if poll_counter % 10 == 0:
+                    if poll_counter % (10 * TICKS_PER_MINUTE) == 0:
                         self._bnb_manager.check_and_refill()
                         self._save_equity_snapshot()
 
@@ -2126,6 +2083,33 @@ class TradingExecutor:
                 f.write(record + "\n")
         except Exception as e:
             self.logger.error(f"Snapshot save error: {e}")
+
+    def _refresh_prices_and_check_reentry(self) -> None:
+        """Batch-fetch mark prices, update each trader, run re-entry checks.
+
+        Replaces the old WebSocket tick-driven flow. Price fetch failures
+        are tolerated — re-entry still runs against the last cached price,
+        so a transient REST hiccup can't strand idle positions.
+        """
+        symbols = list(self.traders.keys())
+        if not symbols:
+            return
+        try:
+            prices = self.api.get_mark_prices(symbols)
+        except Exception as e:
+            self.logger.warning(f"Mark price batch fetch failed: {e}")
+            prices = {}
+
+        for symbol, price in prices.items():
+            trader = self.traders.get(symbol)
+            if trader and price > 0:
+                trader.update_price(price)
+
+        for trader in self.traders.values():
+            try:
+                trader.check_reentry()
+            except Exception as e:
+                self.logger.error(f"Re-entry check error ({trader.symbol}): {e}")
 
     def _log_status(self) -> None:
         """Log current state to file."""
@@ -2159,10 +2143,6 @@ class TradingExecutor:
                 self.api.close_listen_key(self._listen_key)
             except Exception:
                 pass
-
-        # Stop price feed
-        if self.price_feed:
-            self.price_feed.stop()
 
         # Shutdown traders
         for trader in self.traders.values():

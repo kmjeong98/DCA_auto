@@ -343,6 +343,26 @@ class APIClient:
         result = self.client.mark_price(symbol=binance_symbol)
         return float(result["markPrice"])
 
+    def get_mark_prices(self, symbols: Optional[List[str]] = None) -> Dict[str, float]:
+        """Batch-fetch mark prices for all futures symbols in one REST call.
+
+        Returns {symbol: price} keyed by the caller's format (e.g. BTC/USDT).
+        When `symbols` is given, only those symbols are returned.
+        """
+        result = self.client.mark_price()  # all symbols
+        binance_to_caller: Dict[str, str] = {}
+        if symbols is not None:
+            for s in symbols:
+                binance_to_caller[self._to_binance_symbol(s)] = s
+        prices: Dict[str, float] = {}
+        for row in result:
+            bsym = row.get("symbol", "")
+            if symbols is None:
+                prices[bsym] = float(row["markPrice"])
+            elif bsym in binance_to_caller:
+                prices[binance_to_caller[bsym]] = float(row["markPrice"])
+        return prices
+
     def get_min_order_amount(self, symbol: str) -> float:
         """Fetch minimum order quantity."""
         filters = self._get_filters(symbol)
