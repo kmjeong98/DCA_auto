@@ -12,7 +12,7 @@ module.exports = {
       script: "main_optimize.py",
       interpreter: ".venv/bin/python3",
       cwd: __dirname,
-      cron_restart: "0 9 * * 3,6",
+      cron_restart: "0 6 * * 3,6",
       autorestart: false,
       watch: false,
     },

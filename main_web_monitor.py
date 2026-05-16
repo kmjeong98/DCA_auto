@@ -116,9 +116,9 @@ def _calc_pnl_from_snapshots(current: Optional[float]) -> Dict[str, Optional[flo
         oldest_val = snapshots_7d[0]["v"]
         result["pnl_7d"] = current - oldest_val
 
-    # Monthly PnL ($) + Estimated monthly return (%)
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    snapshots_month = _load_snapshots(since=month_start)
+    # 30-day rolling PnL
+    since_30d = now - timedelta(days=30)
+    snapshots_month = _load_snapshots(since=since_30d)
     if snapshots_month:
         first_val = snapshots_month[0]["v"]
         result["pnl_monthly"] = current - first_val

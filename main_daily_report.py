@@ -106,8 +106,8 @@ def _fmt_kst(ts: str) -> str:
         return ""
 
 
-def _decay_weight(age_days: float, half_life: float = 7.0) -> float:
-    """Exponential decay weight. half_life=7 → 7-day-old trade reflected at 50%."""
+def _decay_weight(age_days: float, half_life: float = 14.0) -> float:
+    """Exponential decay weight. half_life=14 → 14-day-old trade reflected at 50%."""
     return 2.0 ** (-age_days / half_life)
 
 
@@ -312,7 +312,7 @@ def build_report() -> str:
 
         total_eff = sum(p["eff_pnl"] for p in recent)
 
-        lines.append("<b>PnL (½=7d)</b>")
+        lines.append("<b>PnL (½=14d)</b>")
         lines.append(f"{len(recent)} ({wins}W/{losses}L)")
         lines.append(f"Net <b>{_fmt_usd(total_eff)}</b>")
 
@@ -333,7 +333,7 @@ def build_report() -> str:
         header = f" {'':6s}{'#':>2s} {'Net':>8s}"
         lines.append("<pre>" + header + "\n" + "\n".join(tbl) + "</pre>")
     else:
-        lines.append("<b>PnL (½=7d)</b>  0")
+        lines.append("<b>PnL (½=14d)</b>  0")
 
     # ── Recent 10 closed positions ────────────────────────
     last10 = positions[:10]
