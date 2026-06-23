@@ -1163,9 +1163,13 @@ class SymbolTrader:
             )
 
             # Route through _handle_sl for consistent logging + cooldown.
-            # realized pnl unknown from market order response → let fallback
-            # path in _handle_sl estimate via cached equity diff.
-            fill_data = {"avg_price": fill_price, "pnl": 0.0}
+            # Realized PnL is unknown from the market order response, so pass
+            # the close order id; _handle_sl fetches it from account trades.
+            fill_data = {
+                "avg_price": fill_price,
+                "pnl": 0.0,
+                "close_order_id": order.get("id"),
+            }
             self._handle_sl(side, fill_data)
         except Exception as e:
             self.logger.error(f"Force SL market close error ({side}): {e}")
@@ -1443,6 +1447,15 @@ class SymbolTrader:
         if fill_data and float(fill_data.get("avg_price", 0)) > 0:
             close_price = float(fill_data["avg_price"])
             realized_pnl = float(fill_data.get("pnl", 0))
+            # STOP_MARKET closePosition=true orders report rp=0 in the
+            # real-time ORDER_TRADE_UPDATE (and the forced-market-close path
+            # cannot know PnL upfront). Recover the true realized PnL from
+            # account trades when the streamed value is missing.
+            if realized_pnl == 0.0:
+                fetch_id = fill_data.get("close_order_id") or old_sl_order_id
+                _, realized_pnl = self._fetch_close_fill(
+                    fetch_id, fallback_price=close_price,
+                )
         else:
             # Fallback (periodic_sync path) — fetch actual fill from exchange.
             close_price, realized_pnl = self._fetch_close_fill(
