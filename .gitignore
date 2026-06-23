@@ -7,5 +7,4 @@ __pycache__/
 *.pyc
 .vscode/
 .DS_Store
-CLAUDE.md
 .claude/
