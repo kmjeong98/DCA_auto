@@ -114,6 +114,19 @@ class OrderUpdateFeed:
         )
         self._ws_client.user_data(listen_key=self.listen_key)
 
+    def update_listen_key(self, listen_key: str) -> None:
+        """Swap in a new listen key and reconnect so the stream re-subscribes.
+
+        Called by the executor when it regenerates the listen key (e.g. after a
+        renewal failure). Without this the feed keeps using the stale key and
+        the socket stays connected but silent — no ORDER_TRADE_UPDATE arrives.
+        """
+        if not listen_key or listen_key == self.listen_key:
+            return
+        self.listen_key = listen_key
+        self.logger.info("Listen key updated — reconnecting user data stream")
+        self._reconnect()
+
     def start(self) -> None:
         if self._running:
             return

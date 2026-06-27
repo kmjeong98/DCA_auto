@@ -1897,6 +1897,10 @@ class TradingExecutor:
             try:
                 self._listen_key = self.api.new_listen_key()
                 self.logger.info("New listen key created")
+                # Propagate to the feed and force a reconnect, else the WS keeps
+                # subscribing with the stale key (connected but silent).
+                if self.order_feed:
+                    self.order_feed.update_listen_key(self._listen_key)
             except Exception as e2:
                 self.logger.error(f"New listen key failed: {e2}")
 
