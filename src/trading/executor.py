@@ -2028,21 +2028,28 @@ class TradingExecutor:
             # Start order retry background thread
             self._start_order_retry_loop()
 
-            # Main loop — 3-second tick drives price refresh + re-entry.
-            # Other periodic tasks fan out via poll_counter (1 tick = 3s).
+            # Main loop — 10-second tick. Each tick runs the old 3s work
+            # (price refresh + re-entry) FIRST, then polls for TP/SL/DCA fills
+            # and reconciles. Fill detection was moved out of the old 5-min
+            # block so TP/SL re-entry latency tracks the tick (~10s) instead of
+            # up to 5 minutes — the WS order stream is unreliable. Slower tasks
+            # fan out via poll_counter (1 tick = 10s).
             poll_counter = 0
-            TICK_SECONDS = 3
-            TICKS_PER_MINUTE = 60 // TICK_SECONDS  # 20
+            TICK_SECONDS = 10
+            TICKS_PER_MINUTE = 60 // TICK_SECONDS  # 6
             while not self._shutdown_event.is_set():
                 self._shutdown_event.wait(timeout=TICK_SECONDS)
 
                 if not self._shutdown_event.is_set():
                     poll_counter += 1
 
-                    # Every 3s: refresh mark prices + run re-entry checks.
-                    # Decoupled from any WebSocket so a network/connection
-                    # blip can't strand idle positions.
+                    # Every 10s — order matters:
+                    # (1) refresh mark prices + run re-entry checks (was 3s).
+                    #     Decoupled from any WebSocket so a network/connection
+                    #     blip can't strand idle positions.
                     self._refresh_prices_and_check_reentry()
+                    # (2) poll for DCA fills + TP/SL closures -> re-entry.
+                    self._poll_fills_and_sync()
 
                     # Every 1 minute: status log + pending removals
                     if poll_counter % TICKS_PER_MINUTE == 0:
@@ -2050,7 +2057,7 @@ class TradingExecutor:
                         if self._pending_removals:
                             self._process_pending_removals()
 
-                    # Every 5 minutes: detect config changes + DCA polling backup + hot param update + sync
+                    # Every 5 minutes: config changes + equity/margin + hot params
                     if poll_counter % (5 * TICKS_PER_MINUTE) == 0:
                         self._check_config_update()
 
@@ -2063,10 +2070,7 @@ class TradingExecutor:
                         for trader in self.traders.values():
                             trader.update_cached_equity(cached_equity)
                             trader._try_update_margin()
-                            trader._check_and_handle_dca_fills("long")
-                            trader._check_and_handle_dca_fills("short")
                             trader._try_hot_update_params()
-                            trader.periodic_sync()
 
                     # Every 10 minutes: check and refill BNB balance + save equity snapshot
                     if poll_counter % (10 * TICKS_PER_MINUTE) == 0:
@@ -2123,6 +2127,23 @@ class TradingExecutor:
                 trader.check_reentry()
             except Exception as e:
                 self.logger.error(f"Re-entry check error ({trader.symbol}): {e}")
+
+    def _poll_fills_and_sync(self) -> None:
+        """Per-tick fill detection: DCA fills + TP/SL reconcile -> re-entry.
+
+        Moved out of the old 5-min block so TP/SL re-entry latency tracks the
+        tick interval (~10s) instead of up to 5 minutes. The WebSocket order
+        stream (OrderUpdateFeed) is unreliable, so this REST polling is the
+        primary fill-detection path. Steady-state cost is ~9 weight/symbol/tick,
+        well within the IP weight budget.
+        """
+        for trader in list(self.traders.values()):
+            try:
+                trader._check_and_handle_dca_fills("long")
+                trader._check_and_handle_dca_fills("short")
+                trader.periodic_sync()
+            except Exception as e:
+                self.logger.error(f"Fill poll error ({trader.symbol}): {e}")
 
     def _log_status(self) -> None:
         """Log current state to file."""
