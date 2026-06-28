@@ -1,5 +1,6 @@
 """Order execution and balance management."""
 
+import functools
 import json
 import os
 import signal
@@ -19,6 +20,24 @@ from src.trading.offline_recovery import OfflineRecovery, ReconEvent
 from src.trading.price_feed import OrderUpdateFeed
 from src.trading.state_manager import StateManager, TradeLogger
 from src.trading.strategy import DCAStrategy, DCALevel, PositionState
+
+
+def _synchronized(method):
+    """Serialize a SymbolTrader state-mutating method on the instance lock.
+
+    These methods are reachable from three threads — the main trading loop,
+    the OrderUpdateFeed (WebSocket) callback, and the order-retry worker — and
+    all mutate the same PositionState. Without a shared lock the WS and the
+    poll can process the same fill concurrently (e.g. both handling a TP ->
+    duplicate market re-entry, or both counting one DCA fill into avg_price).
+    The lock is an RLock because a synchronized entry point calls synchronized
+    helpers (e.g. periodic_sync -> _handle_tp -> _try_update_margin).
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
 
 
 class SymbolTrader:
@@ -65,7 +84,11 @@ class SymbolTrader:
 
         # Current price
         self._current_price: float = 0.0
-        self._lock = threading.Lock()
+        # Re-entrant: synchronized methods run on the main loop, the WS
+        # order-feed callback, and the retry worker; a locked entry point also
+        # calls synchronized helpers (periodic_sync -> _handle_tp ->
+        # _try_update_margin), so the lock must allow same-thread re-entry.
+        self._lock = threading.RLock()
 
         # Balance snapshot (for PnL calculation)
         self._last_equity: float = 0.0
@@ -420,6 +443,7 @@ class SymbolTrader:
         except Exception as e:
             self.logger.error(f"Sync error: {e}")
 
+    @_synchronized
     def periodic_sync(self, positions: Optional[List[Dict[str, Any]]] = None) -> None:
         """Periodically check for state/exchange mismatches and fix them.
 
@@ -768,6 +792,7 @@ class SymbolTrader:
         """Update cached equity from polling loop (no API call here)."""
         self._cached_equity = equity
 
+    @_synchronized
     def _try_update_margin(self) -> None:
         """Attempt margin + params update.
 
@@ -841,6 +866,7 @@ class SymbolTrader:
         except Exception as e:
             self.logger.error(f"Params update error: {e}")
 
+    @_synchronized
     def _try_hot_update_params(self) -> None:
         """Hot-update parameters when DCA count is 0.
 
@@ -1186,6 +1212,7 @@ class SymbolTrader:
         """Check if there are pending retry orders."""
         return bool(self._pending_sl or self._pending_tp or self._pending_dca)
 
+    @_synchronized
     def retry_pending_orders(self) -> None:
         """Retry failed SL/TP/DCA orders (called periodically from outside)."""
         changed = False
@@ -1488,6 +1515,7 @@ class SymbolTrader:
 
         self._save_state()
 
+    @_synchronized
     def _check_and_handle_dca_fills(self, side: str) -> None:
         """Detect and handle DCA fills (polling backup)."""
         state = self.long_state if side == "long" else self.short_state
@@ -1592,38 +1620,39 @@ class SymbolTrader:
                 self.logger.warning(f"Failed to cancel old TP {state.tp_order_id}: {e}")
         self._place_tp_order(side)
 
+    @_synchronized
     def on_order_filled(self, order_id: str, data: Dict[str, Any]) -> None:
         """Detect order fills from User Data Stream."""
         status = data.get("status", "FILLED")
-        with self._lock:
-            for side in ["long", "short"]:
-                state = self.long_state if side == "long" else self.short_state
+        for side in ["long", "short"]:
+            state = self.long_state if side == "long" else self.short_state
 
-                # Check TP fill (only on FILLED)
-                if status == "FILLED" and state.tp_order_id == order_id:
-                    self._handle_tp(side, data)
+            # Check TP fill (only on FILLED)
+            if status == "FILLED" and state.tp_order_id == order_id:
+                self._handle_tp(side, data)
+                return
+
+            # Check SL fill (only on FILLED)
+            if status == "FILLED" and state.sl_order_id == order_id:
+                self._handle_sl(side, data)
+                return
+
+            # Check DCA fill (partial or full)
+            for dca in list(state.dca_orders):
+                if dca.order_id == order_id:
+                    is_final = (status == "FILLED")
+                    if is_final:
+                        state.dca_orders.remove(dca)
+                    self._process_dca_fill(side, dca, data)
+                    self._save_state()
                     return
 
-                # Check SL fill (only on FILLED)
-                if status == "FILLED" and state.sl_order_id == order_id:
-                    self._handle_sl(side, data)
-                    return
-
-                # Check DCA fill (partial or full)
-                for dca in list(state.dca_orders):
-                    if dca.order_id == order_id:
-                        is_final = (status == "FILLED")
-                        if is_final:
-                            state.dca_orders.remove(dca)
-                        self._process_dca_fill(side, dca, data)
-                        self._save_state()
-                        return
-
+    @_synchronized
     def update_price(self, price: float) -> None:
         """Update cached mark price (called periodically by main loop)."""
-        with self._lock:
-            self._current_price = price
+        self._current_price = price
 
+    @_synchronized
     def check_reentry(self) -> None:
         """Enter idle sides whose SL cooldown has elapsed.
 
