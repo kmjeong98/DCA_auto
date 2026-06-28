@@ -420,15 +420,23 @@ class SymbolTrader:
         except Exception as e:
             self.logger.error(f"Sync error: {e}")
 
-    def periodic_sync(self) -> None:
+    def periodic_sync(self, positions: Optional[List[Dict[str, Any]]] = None) -> None:
         """Periodically check for state/exchange mismatches and fix them.
 
         Detects cases where local state says a position is active but
         the exchange has no position (e.g. TP/SL filled while stream was down).
         Checks TP/SL order status to determine which event occurred.
+
+        Args:
+            positions: Pre-fetched positions for THIS symbol (from a batched
+                account-wide fetch by the caller). An empty list means "no open
+                position for this symbol". When None, fetch them here — keeps
+                standalone callers working. Only `positions` is injectable; all
+                other reconciliation calls (orders/algo) stay per-symbol.
         """
         try:
-            positions = self.api.get_positions(self.symbol)
+            if positions is None:
+                positions = self.api.get_positions(self.symbol)
             exchange_sides = set()
             for pos in positions:
                 side = pos.get("side", "").lower()
@@ -2138,14 +2146,37 @@ class TradingExecutor:
         Moved out of the old 5-min block so TP/SL re-entry latency tracks the
         tick interval (~10s) instead of up to 5 minutes. The WebSocket order
         stream (OrderUpdateFeed) is unreliable, so this REST polling is the
-        primary fill-detection path. Steady-state cost is ~9 weight/symbol/tick,
-        well within the IP weight budget.
+        primary fill-detection path.
+
+        Positions are fetched once for the whole account (weight 5) and sliced
+        per symbol, instead of one positionRisk call per symbol (5 x N). Order
+        and algo-order checks stay per-symbol (openOrders is weight 1 per
+        symbol, cheaper than the account-wide weight-40 call).
         """
+        # Batched account-wide positions. by_symbol stays None if the call
+        # fails, so each trader falls back to its own per-symbol fetch.
+        by_symbol: Optional[Dict[str, List[Dict[str, Any]]]] = None
+        try:
+            all_positions = self.api.get_positions()  # no symbol = all
+            by_symbol = {}
+            for p in all_positions:
+                by_symbol.setdefault(p["symbol"], []).append(p)
+        except Exception as e:
+            self.logger.warning(f"Batched positions fetch failed: {e}")
+
         for trader in list(self.traders.values()):
             try:
                 trader._check_and_handle_dca_fills("long")
                 trader._check_and_handle_dca_fills("short")
-                trader.periodic_sync()
+                if by_symbol is None:
+                    sym_positions = None  # batch failed -> trader self-fetches
+                else:
+                    # Empty list (not None) when this symbol has no open
+                    # position, so periodic_sync uses the batch instead of
+                    # re-fetching. get_positions() only returns amount>0 rows.
+                    bsym = self.api._to_binance_symbol(trader.symbol)
+                    sym_positions = by_symbol.get(bsym, [])
+                trader.periodic_sync(positions=sym_positions)
             except Exception as e:
                 self.logger.error(f"Fill poll error ({trader.symbol}): {e}")
 
