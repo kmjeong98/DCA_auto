@@ -105,21 +105,31 @@ class OrderUpdateFeed:
         self.logger.info("User data stream connected")
 
     def _connect(self) -> None:
+        # Connect directly to the user-data stream path. Binance starts pushing
+        # account events immediately on connect — no SUBSCRIBE needed.
+        #
+        # The previous approach connected to the bare host and then called
+        # user_data() (which sends {"method":"SUBSCRIBE","params":[listenKey]}).
+        # That stopped delivering events around 2026-04-24: the socket connected,
+        # the SUBSCRIBE was ACKed, ping/pong stayed alive, but no ORDER_TRADE_UPDATE
+        # frames ever arrived. The listenKey-in-path form is the documented way
+        # and reconnects naturally pick up an updated key via self.listen_key.
+        stream_url = f"{self.ws_url}/ws/{self.listen_key}"
         self._ws_client = UMFuturesWebsocketClient(
-            stream_url=self.ws_url,
+            stream_url=stream_url,
             on_message=self._on_message,
             on_close=self._on_close,
             on_error=self._on_error,
             on_open=self._on_open,
         )
-        self._ws_client.user_data(listen_key=self.listen_key)
 
     def update_listen_key(self, listen_key: str) -> None:
-        """Swap in a new listen key and reconnect so the stream re-subscribes.
+        """Swap in a new listen key and reconnect with it in the stream URL.
 
         Called by the executor when it regenerates the listen key (e.g. after a
-        renewal failure). Without this the feed keeps using the stale key and
-        the socket stays connected but silent — no ORDER_TRADE_UPDATE arrives.
+        renewal failure). Without this the feed keeps connecting with the stale
+        key and stays silent — no ORDER_TRADE_UPDATE arrives. _connect() builds
+        the URL from self.listen_key, so the reconnect picks up the new key.
         """
         if not listen_key or listen_key == self.listen_key:
             return
