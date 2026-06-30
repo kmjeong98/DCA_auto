@@ -38,9 +38,25 @@ class OrderUpdateFeed:
         self._ws_client: Optional[UMFuturesWebsocketClient] = None
         self._running = False
         self._reconnect_lock = threading.Lock()
+        # Monotonic timestamp of the last inbound frame (data OR ping/pong).
+        # Binance pushes a PING every ~3 min, so a healthy stream refreshes
+        # this even when no orders fill. The executor's watchdog uses it to
+        # detect a silently-dead stream (connected but no frames). 0.0 = never
+        # seen a frame yet -> treated as infinitely stale by seconds_since_activity.
+        self._last_activity: float = 0.0
+
+    def _mark_activity(self) -> None:
+        self._last_activity = time.monotonic()
+
+    def seconds_since_activity(self) -> float:
+        """Seconds since the last inbound frame; inf if none seen yet."""
+        if self._last_activity == 0.0:
+            return float("inf")
+        return time.monotonic() - self._last_activity
 
     def _on_message(self, _, message: str) -> None:
         """Handle message."""
+        self._mark_activity()
         try:
             data = json.loads(message)
             event_type = data.get("e")
@@ -101,7 +117,16 @@ class OrderUpdateFeed:
         self.logger.error(f"WebSocket error: {error}")
         self._reconnect()
 
+    def _on_ping(self, _, data) -> None:
+        # Binance sends a PING every ~3 min; the library auto-replies PONG.
+        # We only stamp it as our liveness heartbeat.
+        self._mark_activity()
+
+    def _on_pong(self, _) -> None:
+        self._mark_activity()
+
     def _on_open(self, _) -> None:
+        self._mark_activity()
         self.logger.info("User data stream connected")
 
     def _connect(self) -> None:
@@ -121,6 +146,8 @@ class OrderUpdateFeed:
             on_close=self._on_close,
             on_error=self._on_error,
             on_open=self._on_open,
+            on_ping=self._on_ping,
+            on_pong=self._on_pong,
         )
 
     def update_listen_key(self, listen_key: str) -> None:
@@ -136,6 +163,23 @@ class OrderUpdateFeed:
         self.listen_key = listen_key
         self.logger.info("Listen key updated — reconnecting user data stream")
         self._reconnect()
+
+    def force_reconnect(self, listen_key: Optional[str] = None) -> None:
+        """Force a reconnect, optionally swapping in a fresh listen key.
+
+        Used by the executor's staleness watchdog. The stream can stay
+        connected (ping/pong alive) yet stop delivering ORDER_TRADE_UPDATE
+        frames; _on_close/_on_error never fire in that case, so nothing else
+        triggers recovery. Unlike update_listen_key this reconnects even when
+        the key is unchanged (Binance returns the same key while it's valid).
+        Runs on a daemon thread so the caller (main loop) isn't blocked by
+        _reconnect's backoff sleep.
+        """
+        if not self._running:
+            return
+        if listen_key:
+            self.listen_key = listen_key
+        threading.Thread(target=self._reconnect, daemon=True).start()
 
     def start(self) -> None:
         if self._running:

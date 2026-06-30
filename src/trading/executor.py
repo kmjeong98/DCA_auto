@@ -173,6 +173,14 @@ class SymbolTrader:
         # Immediately reflect sync result in state file (for monitor display)
         self._save_state()
 
+        # Cold-start capital reconcile: after a restart/redeploy we may boot flat
+        # with profit already accrued. Refresh capital once so the first entry
+        # sizes off current equity instead of stale on-disk capital. No-op when
+        # _sync_with_exchange adopted a position (both_inactive guard) or equity
+        # is unavailable (_cached_equity guard). force=False preserves the
+        # increase-only rule.
+        self._try_update_margin()
+
         self._initialized = True
         self.logger.info(
             f"Initialized {self.symbol} - Capital: ${self.capital:.2f}, "
@@ -2069,12 +2077,14 @@ class TradingExecutor:
             # Start order retry background thread
             self._start_order_retry_loop()
 
-            # Main loop — 10-second tick. Each tick runs the old 3s work
-            # (price refresh + re-entry) FIRST, then polls for TP/SL/DCA fills
-            # and reconciles. Fill detection was moved out of the old 5-min
-            # block so TP/SL re-entry latency tracks the tick (~10s) instead of
-            # up to 5 minutes — the WS order stream is unreliable. Slower tasks
-            # fan out via poll_counter (1 tick = 10s).
+            # Main loop — 10-second tick. Each tick runs the price refresh +
+            # re-entry work FIRST, then polls for TP/SL/DCA fills and
+            # reconciles. Fill detection was moved out of the old 5-min block
+            # so TP/SL re-entry latency tracks the tick (~10s) instead of up to
+            # 5 minutes. The WS order stream is the low-latency primary path
+            # (with a staleness watchdog, see _check_order_feed_health); this
+            # REST poll is the backup. Slower tasks fan out via poll_counter
+            # (1 tick = 10s).
             poll_counter = 0
             TICK_SECONDS = 10
             TICKS_PER_MINUTE = 60 // TICK_SECONDS  # 6
@@ -2092,11 +2102,12 @@ class TradingExecutor:
                     # (2) poll for DCA fills + TP/SL closures -> re-entry.
                     self._poll_fills_and_sync()
 
-                    # Every 1 minute: status log + pending removals
+                    # Every 1 minute: status log + pending removals + WS health
                     if poll_counter % TICKS_PER_MINUTE == 0:
                         self._log_status()
                         if self._pending_removals:
                             self._process_pending_removals()
+                        self._check_order_feed_health()
 
                     # Every 5 minutes: config changes + equity/margin + hot params
                     if poll_counter % (5 * TICKS_PER_MINUTE) == 0:
@@ -2126,6 +2137,37 @@ class TradingExecutor:
             self.shutdown()
 
     _SNAPSHOT_DIR = Path("data/balance_snapshots")
+
+    # Force-reconnect the user-data stream after this many seconds of silence.
+    # Binance pings every ~3 min and disconnects after 10 min of no pong, so 5
+    # min cleanly separates a healthy stream (refreshed every ~3 min via
+    # on_ping) from a silently-dead one, while leaving margin against ping jitter.
+    _ORDER_FEED_STALE_SECONDS = 300
+
+    def _check_order_feed_health(self) -> None:
+        """Force-reconnect the user-data stream if it has gone silent.
+
+        The WS can stay connected (ping/pong alive at the transport layer) yet
+        stop delivering ORDER_TRADE_UPDATE frames; _on_close/_on_error never
+        fire, so nothing else recovers it. on_ping stamps activity every ~3 min,
+        so silence beyond the threshold means the stream is effectively dead.
+        REST polling still catches fills meanwhile — this just restores the
+        low-latency path.
+        """
+        if not self.order_feed:
+            return
+        age = self.order_feed.seconds_since_activity()
+        if age <= self._ORDER_FEED_STALE_SECONDS:
+            return
+        self.logger.warning(
+            f"Order feed silent for {age:.0f}s — regenerating listen key "
+            f"and reconnecting"
+        )
+        try:
+            self._listen_key = self.api.new_listen_key()
+        except Exception as e:
+            self.logger.error(f"Listen key regen during stale reconnect failed: {e}")
+        self.order_feed.force_reconnect(self._listen_key)
 
     def _save_equity_snapshot(self) -> None:
         """Save equity snapshot to JSONL file (for 24h/monthly PnL)."""
