@@ -2077,24 +2077,24 @@ class TradingExecutor:
             # Start order retry background thread
             self._start_order_retry_loop()
 
-            # Main loop — 10-second tick. Each tick runs the price refresh +
+            # Main loop — 5-second tick. Each tick runs the price refresh +
             # re-entry work FIRST, then polls for TP/SL/DCA fills and
             # reconciles. Fill detection was moved out of the old 5-min block
-            # so TP/SL re-entry latency tracks the tick (~10s) instead of up to
+            # so TP/SL re-entry latency tracks the tick (~5s) instead of up to
             # 5 minutes. The WS order stream is the low-latency primary path
             # (with a staleness watchdog, see _check_order_feed_health); this
             # REST poll is the backup. Slower tasks fan out via poll_counter
-            # (1 tick = 10s).
+            # (1 tick = 5s).
             poll_counter = 0
-            TICK_SECONDS = 10
-            TICKS_PER_MINUTE = 60 // TICK_SECONDS  # 6
+            TICK_SECONDS = 5
+            TICKS_PER_MINUTE = 60 // TICK_SECONDS  # 12
             while not self._shutdown_event.is_set():
                 self._shutdown_event.wait(timeout=TICK_SECONDS)
 
                 if not self._shutdown_event.is_set():
                     poll_counter += 1
 
-                    # Every 10s — order matters:
+                    # Every 5s — order matters:
                     # (1) refresh mark prices + run re-entry checks (was 3s).
                     #     Decoupled from any WebSocket so a network/connection
                     #     blip can't strand idle positions.
